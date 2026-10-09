@@ -3,6 +3,7 @@ import {
   loadSnapshot,
   MERGE_PREFIX,
   parseMergeItem,
+  snapshotVersion,
 } from "./merge-history.js";
 import {
   expandSnapshot,
@@ -13,7 +14,12 @@ import {
 import { semanticPlan } from "./merge-semantic.js";
 import { parseGraphItem } from "./merge-graph.js";
 import { graphMergePlan } from "./merge-views.js";
-import { saveMergeLineage } from "./context-tree.js";
+import { saveMergeLineage } from "./context-lineage.js";
+import {
+  inspectMergeUpdates,
+  restoreCompactedGraph,
+  summarizeUpdates,
+} from "./merge-updates.js";
 
 export const DEFAULT_MAX_BYTES = 512 * 1024;
 
@@ -146,13 +152,14 @@ export function planMerge(snapshots, { maxBytes = DEFAULT_MAX_BYTES } = {}) {
 
 /** Merge into a fresh, durable native fork. All source threads remain readable. */
 export async function mergeThreads(client, options = {}) {
-  const { threadIds, maxBytes, name, dryRun = false, cwd } = options;
+  let { threadIds } = options;
+  const { maxBytes, name, dryRun = false, cwd } = options;
   const mode = options.mode ?? "auto";
   const semantic = options.semantic ?? mode !== "reference";
   options = { ...options, mode, semantic };
   if (
     !Array.isArray(threadIds) ||
-    threadIds.length < 2 ||
+    threadIds.length < (options.update ? 1 : 2) ||
     threadIds.length > 32 ||
     threadIds.some((id) => typeof id !== "string" || !id.length) ||
     new Set(threadIds).size !== threadIds.length
@@ -205,13 +212,75 @@ export async function mergeThreads(client, options = {}) {
     )
       throw new Error(field + " must be non-empty");
   }
+  let updateInspection;
+  if (options.update) {
+    if (threadIds.length !== 1 || mode === "legacy")
+      throw new Error(
+        "--update takes only the current/base thread ID and requires a graph merge mode",
+      );
+    updateInspection = await inspectMergeUpdates(client, threadIds[0]);
+    if (!updateInspection.merged)
+      throw new Error(
+        "--update needs a previously merged chat; use /merge with source IDs first",
+      );
+    const blocked = updateInspection.sources.filter((source) =>
+      ["changed", "unavailable"].includes(source.state),
+    );
+    if (blocked.length)
+      throw new Error(
+        "Cannot update all sources: " +
+          blocked.map((source) => `${source.id}: ${source.reason}`).join("; "),
+      );
+    const pending = updateInspection.sources.filter(
+      (source) => source.state === "pending",
+    );
+    if (!pending.length)
+      return {
+        dryRun,
+        noOp: true,
+        threadId: threadIds[0],
+        message: "All merged sources are up to date. No new chat was created.",
+        importedItems: 0,
+        skippedItems: 0,
+        contextBytes: 0,
+        modelCalls: 0,
+        updates: summarizeUpdates(updateInspection),
+      };
+    threadIds = [threadIds[0], ...pending.map((source) => source.id)];
+    if (threadIds.length > 32)
+      throw new Error(
+        "More than 31 sources have updates; merge them explicitly in batches",
+      );
+    options = { ...options, threadIds };
+  }
   const nativeSnapshots = [];
   for (const id of threadIds)
     nativeSnapshots.push(await loadSnapshot(client, id));
+  if (updateInspection) {
+    const expected = new Map([
+      [threadIds[0], snapshotVersion(updateInspection.primarySnapshot.records)],
+      ...updateInspection.sources.map((source) => [source.id, source.snapshot]),
+    ]);
+    for (const snapshot of nativeSnapshots)
+      if (
+        JSON.stringify(snapshotVersion(snapshot.records)) !==
+        JSON.stringify(expected.get(snapshot.thread.id))
+      )
+        throw new Error(
+          "Source changed while checking updates; retry when all sources are idle",
+        );
+  }
   const snapshots = [];
   const evidenceCache = new Map();
-  for (const snapshot of nativeSnapshots)
-    snapshots.push(await expandSnapshot(snapshot, evidenceCache));
+  for (const snapshot of nativeSnapshots) {
+    let expanded = await expandSnapshot(snapshot, evidenceCache);
+    if (!snapshots.length && updateInspection)
+      expanded = restoreCompactedGraph(expanded, updateInspection);
+    snapshots.push({
+      ...expanded,
+      nativeVersion: snapshotVersion(snapshot.records),
+    });
+  }
   let plan;
   if (mode === "legacy") {
     plan = planMerge(snapshots, {
@@ -220,7 +289,20 @@ export async function mergeThreads(client, options = {}) {
     if (semantic) plan = await semanticPlan(client, snapshots, plan, options);
   } else
     plan = await graphMergePlan(client, snapshots, nativeSnapshots, options);
+  if (updateInspection)
+    plan.summary.updates = summarizeUpdates(updateInspection);
   if (dryRun) return { dryRun: true, ...plan.summary };
+  if (updateInspection)
+    for (const snapshot of nativeSnapshots) {
+      const current = await loadSnapshot(client, snapshot.thread.id);
+      if (
+        JSON.stringify(snapshotVersion(current.records)) !==
+        JSON.stringify(snapshotVersion(snapshot.records))
+      )
+        throw new Error(
+          "Source changed during update analysis; retry when all sources are idle",
+        );
+    }
   let target;
   try {
     if (plan.primaryEmbedded) {
@@ -330,6 +412,7 @@ export async function mergeThreads(client, options = {}) {
       target.id,
       nativeSnapshots,
       plan.summary,
+      persisted,
     );
     await client.request("thread/unsubscribe", { threadId: target.id });
     return { dryRun: false, threadId: target.id, ...plan.summary };

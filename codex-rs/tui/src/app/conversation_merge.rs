@@ -50,9 +50,11 @@ struct ContextTreeRow {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ContextTreeResult {
     rows: Vec<ContextTreeRow>,
     warnings: Vec<String>,
+    update_hint: Option<String>,
 }
 
 struct MergeThread {
@@ -304,6 +306,14 @@ impl App {
                             .chat_widget
                             .add_error_message(format!("Could not list merge branches: {error:#}")),
                     }
+                } else if result["noOp"].as_bool() == Some(true) {
+                    self.chat_widget.add_info_message(
+                        result["message"]
+                            .as_str()
+                            .unwrap_or("All merged sources are up to date.")
+                            .into(),
+                        None,
+                    );
                 } else if result["dryRun"].as_bool() == Some(true) {
                     self.chat_widget.add_info_message(
                         format!("Merge preview:\n{}", serde_json::to_string_pretty(&result)?),
@@ -320,10 +330,12 @@ impl App {
                         let target_id = target.thread_id;
                         let control = self.resume_target_session(tui, app_server, target).await?;
                         if self.chat_widget.thread_id() == Some(target_id) {
-                            self.chat_widget.add_info_message(
-                                "Branches merged. You can continue here.".into(),
-                                None,
-                            );
+                            let message = if result.get("updates").is_some() {
+                                "Source updates merged. You can continue here."
+                            } else {
+                                "Branches merged. You can continue here."
+                            };
+                            self.chat_widget.add_info_message(message.into(), None);
                         } else {
                             self.chat_widget.add_info_message(
                                 format!("Merge saved as {thread_id}. Use /resume {thread_id} to open it."), None,
@@ -388,6 +400,9 @@ impl App {
                 if !result.warnings.is_empty() {
                     self.chat_widget
                         .add_info_message(result.warnings.join("\n"), None);
+                }
+                if let Some(hint) = result.update_hint {
+                    self.chat_widget.add_info_message(hint, None);
                 }
                 if let Some(target) = target {
                     match result.rows.iter().find(|row| row.id == target) {

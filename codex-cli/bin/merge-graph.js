@@ -1,7 +1,6 @@
-import { hash, recordRef } from "./merge-history.js";
+import { GRAPH_PREFIX, hash, recordRef } from "./merge-history.js";
 
-export const GRAPH_PREFIX =
-  "Codex conversation graph merge (quoted branch history):\n";
+export { GRAPH_PREFIX };
 export const FUSION_PREFIX =
   "Codex conversation graph synthesis (model-generated reading):\n";
 export const GRAPH_FORMAT = "codex-conversation-graph-v1";
@@ -427,9 +426,22 @@ export function buildConversationGraph(snapshots) {
   const records = graph.nodes
     .filter((n) => n.recordRef)
     .map((n) => catalog.get(n.recordRef));
-  const contexts = new Map(
-    snapshots.flatMap((s) => [...(s.contexts?.entries() ?? [])]),
-  );
+  const contexts = new Map();
+  for (const snapshot of snapshots)
+    for (const [id, context] of snapshot.contexts ?? []) {
+      const previous = contexts.get(id);
+      // An older imported graph must not move an already incorporated source
+      // boundary backwards. Explicit sources below establish their CURRENT
+      // boundary, including intentional rollback/replacement remerges.
+      contexts.set(
+        id,
+        previous?.snapshot &&
+          (!context.snapshot ||
+            previous.snapshot.recordCount > context.snapshot.recordCount)
+          ? { ...context, snapshot: previous.snapshot }
+          : context,
+      );
+    }
   for (const snapshot of snapshots)
     contexts.set(snapshot.thread.id, {
       id: snapshot.thread.id,
@@ -437,6 +449,7 @@ export function buildConversationGraph(snapshots) {
       cwd: snapshot.thread.cwd,
       gitInfo: snapshot.thread.gitInfo ?? null,
       forkedFromId: snapshot.thread.forkedFromId ?? null,
+      ...(snapshot.nativeVersion ? { snapshot: snapshot.nativeVersion } : {}),
     });
   const archive = {
     format: "codex-merge-evidence-v1",

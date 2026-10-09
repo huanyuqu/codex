@@ -82,4 +82,4 @@ This repository is licensed under the [Apache-2.0 License](LICENSE).
 
 ## Conversation graph merge
 
-This fork adds conversation context merging with semantic synthesis by default, interactive `/merge`, and `/tree` branch navigation. See [the merge guide](docs/context_merge.md) and [local checkout instructions](docs/context_merge_checkout.md).
+This fork adds conversation context merging with semantic synthesis by default, interactive `/merge`, and `/tree` branch navigation with pending-source indicators. Use `/merge --update` to merge later source changes into a new conversation while preserving current work. See [the merge guide](docs/context_merge.md) and [local checkout instructions](docs/context_merge_checkout.md).

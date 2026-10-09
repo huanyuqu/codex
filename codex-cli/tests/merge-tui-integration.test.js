@@ -21,8 +21,8 @@ const hasPty =
   spawnSync("python3", ["--version"]).status === 0;
 
 test(
-  "native /merge and /tree: default synthesis, branch switching, continuation and cancellation",
-  { skip: !binary || !hasPty, timeout: 120000 },
+  "native /merge and /tree: default synthesis, branch switching, incremental updates and cancellation",
+  { skip: !binary || !hasPty, timeout: 180000 },
   async (t) => {
     const root = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
     const home = await mkdtemp(path.join(os.tmpdir(), "codex-tui-merge-"));
@@ -462,6 +462,112 @@ trust_level = "trusted"
           source.id + " context",
         );
       }
+      await client.close();
+      terminal = startTerminal(mergedId);
+      await terminal.wait((screen) => screen.includes("graph-fixture"));
+      await delay(700);
+      const beforeNoOp = calls.length;
+      await terminal.command("/merge --update");
+      await terminal.wait((screen) =>
+        screen.includes("All merged sources are up to date."),
+      );
+      await verifyRollout(mergedId);
+      assert.equal(
+        calls.length,
+        beforeNoOp,
+        "unchanged updates do not call a model or switch chats",
+      );
+      await terminal.command("/tree " + b.id);
+      await delay(700);
+      await verifyRollout(b.id);
+      const beforeBranchWork = calls.length;
+      await terminal.command(
+        "B4: After the first merge, revise the ending and keep the sealed letter unread.",
+      );
+      await terminal.wait(() => calls.length > beforeBranchWork);
+      await delay(700);
+      await terminal.command("/tree " + mergedId);
+      await delay(700);
+      await verifyRollout(mergedId);
+      client = new AppServerClient(binary, { env });
+      await client.initialize();
+      const branchAfterWork = await loadSnapshot(client, b.id);
+      const pendingMark = terminal.screen().length;
+      const beforeUpdateCalls = calls.length;
+      await terminal.command("/tree");
+      await terminal.wait((screen) =>
+        screen.slice(pendingMark).includes("pending"),
+      );
+      assert.ok(
+        terminal.screen().slice(pendingMark).includes("/merge --update"),
+      );
+      terminal.input("\x1b");
+      await delay(200);
+      const previewMark = terminal.screen().length;
+      await terminal.command("/merge --update --dry-run");
+      await terminal.wait((screen) =>
+        screen.slice(previewMark).includes("Merge preview:"),
+      );
+      assert.equal(calls.length, beforeUpdateCalls);
+      await terminal.command("/merge --update");
+      await terminal.wait((screen) =>
+        screen.includes("Source updates merged. You can continue here."),
+      );
+      assert.equal(calls.length, beforeUpdateCalls + 1);
+      const updatedRolloutMark = terminal.screen().length;
+      await terminal.command("/rollout");
+      await terminal.wait((screen) =>
+        screen.slice(updatedRolloutMark).includes("rollout-"),
+      );
+      const updatedId = terminal
+        .screen()
+        .slice(updatedRolloutMark)
+        .match(/[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}/)?.[0];
+      assert.ok(
+        updatedId && updatedId !== mergedId && !ids.includes(updatedId),
+      );
+      await terminal.command(
+        "Continue the merged ending discussion after the branch update.",
+      );
+      await terminal.wait(() => calls.length > beforeUpdateCalls + 1);
+      await delay(700);
+      const updatedContinuation = JSON.stringify(
+        calls.find((body) =>
+          JSON.stringify(body.input).includes(
+            "Continue the merged ending discussion after the branch update.",
+          ),
+        ),
+      );
+      assert.ok(updatedContinuation.includes("B4: After the first merge"));
+      assert.ok(
+        updatedContinuation.includes(
+          "Continue comparing both prose candidates.",
+        ),
+      );
+      const unchangedMark = terminal.screen().length;
+      const beforeRepeatedUpdate = calls.length;
+      await terminal.command("/merge --update");
+      await terminal.wait((screen) =>
+        screen
+          .slice(unchangedMark)
+          .includes("All merged sources are up to date."),
+      );
+      await verifyRollout(updatedId);
+      assert.equal(calls.length, beforeRepeatedUpdate);
+      await terminal.save("tui-smoke-update");
+      await terminal.command("/quit");
+      await delay(1000);
+      await terminal.stop();
+      const branchAfterUpdate = await loadSnapshot(client, b.id);
+      assert.deepEqual(
+        branchAfterUpdate.records.map((record) => record.json),
+        branchAfterWork.records.map((record) => record.json),
+      );
+      report.cases.push({
+        name: "source continuation, pending tree hint, update preview, semantic update, retained mainline and no-op",
+        passed: true,
+        modelCallsForMerge: 1,
+      });
       const threads = await client.request("thread/list", {
         modelProviders: [],
         limit: 100,
@@ -472,20 +578,20 @@ trust_level = "trusted"
         const snapshot = await loadSnapshot(client, thread.id);
         const capsule = snapshot.records
           .map((r) => parseGraphItem(JSON.parse(r.json)))
-          .find(Boolean);
+          .findLast(Boolean);
         if (capsule) {
           const evidence = await readEvidence(capsule.evidence);
           assert.equal(
             evidence.graph.nodes.find(
               (n) => n.id === evidence.graph.mergeNodeId,
             ).parents.length,
-            3,
+            thread.id === updatedId ? 2 : 3,
           );
           merged.push(thread.id);
         }
       }
-      assert.equal(merged.length, 2);
-      report.sourceContextsUnchanged = true;
+      assert.equal(merged.length, 3);
+      report.sourceContextsPreservedByMerge = true;
       report.savedMerges = merged;
       report.totalModelRequests = calls.length;
       await writeFile(

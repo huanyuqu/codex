@@ -4,7 +4,8 @@ import { createInterface } from "node:readline";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { exampleSources, fakeGraphClient } from "./fixtures/graph.js";
+import { exampleSources, fakeGraphClient, message } from "./fixtures/graph.js";
+import { mergeThreads } from "../bin/merge-context.js";
 import { parseGraphItem } from "../bin/merge-graph.js";
 import { JsonRpcClient } from "../bin/merge-rpc.js";
 
@@ -18,11 +19,16 @@ async function runBridge(
     disconnect = false,
     sources = exampleSources(),
     operation,
+    prepare,
   } = {},
 ) {
   const { client } = await fakeGraphClient(t, sources);
+  const primaryThreadId = (await prepare?.(client)) ?? "A";
+  client.calls.length = 0;
   const originals = await Promise.all(
-    [...client.threads.values()].map((thread) => readFile(thread.path)),
+    sources.map((source) =>
+      readFile(client.threads.get(source.thread.id).path),
+    ),
   );
   const child = spawn(process.execPath, [helper], {
     env: client.env,
@@ -111,7 +117,7 @@ async function runBridge(
   send({
     type: "start",
     operation,
-    primaryThreadId: "A",
+    primaryThreadId,
     args,
     model: "fixture-reader",
   });
@@ -196,6 +202,50 @@ test("TUI merge options without IDs request the branch picker", async (t) => {
     args: ["--goal", "Compare the views"],
   });
   assert.equal(client.calls.length, 0);
+});
+
+test("TUI --update discovers recorded sources and opens a fresh merge without a picker", async (t) => {
+  const { client, result, exitCode } = await runBridge(t, ["--update"], {
+    prepare: async (client) => {
+      const merged = await mergeThreads(client, {
+        threadIds: ["A", "B", "C"],
+        mode: "reference",
+      });
+      await client.request("thread/inject_items", {
+        threadId: "B",
+        items: [message("B later update", "b3")],
+      });
+      return merged.threadId;
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(result.selectBranches, undefined);
+  assert.equal(result.importedItems, 1);
+  assert.equal(result.modelCalls, 1);
+  assert.equal(result.updates.pendingSources, 1);
+  assert.ok(client.calls.some((call) => call.method === "thread/fork"));
+});
+
+test("TUI --update with unchanged sources returns a no-op on the current chat", async (t) => {
+  let primary;
+  const { client, result, exitCode } = await runBridge(t, ["--update"], {
+    prepare: async (client) => {
+      const merged = await mergeThreads(client, {
+        threadIds: ["A", "B", "C"],
+        mode: "reference",
+      });
+      primary = merged.threadId;
+      return primary;
+    },
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(result.noOp, true);
+  assert.equal(result.threadId, primary);
+  assert.ok(
+    client.calls.every((call) =>
+      ["thread/read", "thread/list"].includes(call.method),
+    ),
+  );
 });
 
 test("TUI merge dry run performs no inference or thread creation", async (t) => {

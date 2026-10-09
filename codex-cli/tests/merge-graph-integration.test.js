@@ -317,7 +317,8 @@ for (const historyMode of ["legacy", "paginated"])
         items: [message("B继续保留一个例外。", "b-update")],
       });
       const incremental = await mergeThreads(client, {
-        threadIds: [repeated.threadId, b.id],
+        threadIds: [repeated.threadId],
+        update: true,
       });
       assert.equal(incremental.importedItems, 1);
       assert.equal(provider.requests.length, priorRequests);
@@ -337,6 +338,14 @@ for (const historyMode of ["legacy", "paginated"])
         { env },
       );
       assert.equal(JSON.parse(cli.stdout).importedItems, 0);
+      const noOp = await exec(
+        process.execPath,
+        [launcher, "merge", incremental.threadId, "--update", "--json"],
+        { env },
+      );
+      assert.equal(JSON.parse(noOp.stdout).noOp, true);
+      assert.equal(JSON.parse(noOp.stdout).threadId, incremental.threadId);
+      assert.equal(provider.requests.length, priorRequests);
       const beforeSynthesis = provider.requests.length;
       const synthesizedCli = await exec(
         process.execPath,

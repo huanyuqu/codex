@@ -1,98 +1,24 @@
-import { mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
-import os from "node:os";
+import { open } from "node:fs/promises";
 import path from "node:path";
 import * as zlib from "node:zlib";
 import { promisify } from "node:util";
-import { loadSnapshot } from "./merge-history.js";
 import { readEvidence } from "./merge-evidence.js";
 import { GRAPH_PREFIX, parseGraphItem } from "./merge-graph.js";
+import {
+  LINEAGE_FORMAT,
+  readMergeLineages,
+  validateMergeLineage,
+} from "./context-lineage.js";
+import {
+  createUpdateCache,
+  inspectMergeUpdates,
+  loadUpdateSnapshot,
+  summarizeUpdates,
+} from "./merge-updates.js";
 
-const FORMAT = "codex-session-lineage-v1";
-const directory = (env = process.env) =>
-  path.join(
-    env.CODEX_HOME ?? path.join(os.homedir(), ".codex"),
-    "merges",
-    "lineage",
-  );
 const clean = (value) => String(value ?? "").replace(/[\x00-\x1f\x7f]/g, " ");
 const validId = (id) =>
   typeof id === "string" && id.length > 0 && id.length <= 256;
-
-function validate(entry) {
-  if (
-    entry?.format !== FORMAT ||
-    !validId(entry.threadId) ||
-    !Array.isArray(entry.sources) ||
-    entry.sources.length < 2 ||
-    entry.sources.length > 32 ||
-    entry.sources.some((s) => !validId(s.id) || s.id === entry.threadId) ||
-    new Set(entry.sources.map((s) => s.id)).size !== entry.sources.length
-  )
-    throw new Error("Invalid session merge lineage");
-  return entry;
-}
-
-// Graph evidence is immutable and created before the native target exists. This
-// small index binds its merge to the actual saved target, including fresh starts
-// used for oversized primaries. It also survives compaction of the visible chat.
-export async function saveMergeLineage(env, threadId, snapshots, summary) {
-  const entry = validate({
-    format: FORMAT,
-    threadId,
-    sources: snapshots.map(({ thread }) => ({
-      id: thread.id,
-      name: thread.name ?? null,
-      forkedFromId: thread.forkedFromId ?? null,
-    })),
-    evidence: summary.evidence ?? null,
-  });
-  const root = directory(env);
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  const file = path.join(root, encodeURIComponent(threadId) + ".json");
-  const temporary = file + "." + randomUUID() + ".tmp";
-  try {
-    await writeFile(temporary, JSON.stringify(entry) + "\n", {
-      flag: "wx",
-      mode: 0o600,
-    });
-    await rename(temporary, file);
-  } finally {
-    await rm(temporary, { force: true });
-  }
-  return entry;
-}
-
-async function readLineages(env, warnings) {
-  let files;
-  try {
-    files = await readdir(directory(env));
-  } catch (error) {
-    if (error.code === "ENOENT") return new Map();
-    throw error;
-  }
-  const entries = new Map();
-  for (const name of files.filter((f) => f.endsWith(".json")).sort()) {
-    let handle;
-    try {
-      handle = await open(path.join(directory(env), name), "r");
-      const stat = await handle.stat();
-      if (!stat.isFile() || stat.size > 128 * 1024)
-        throw new Error("Oversized lineage index");
-      const entry = validate(JSON.parse(await handle.readFile("utf8")));
-      if (name !== encodeURIComponent(entry.threadId) + ".json")
-        throw new Error("Lineage identity mismatch");
-      entries.set(entry.threadId, entry);
-    } catch (error) {
-      warnings.push(
-        `Could not read lineage ${clean(name)}: ${clean(error.message)}`,
-      );
-    } finally {
-      await handle?.close();
-    }
-  }
-  return entries;
-}
 
 async function readForkParent(thread) {
   if (!thread.path || !path.isAbsolute(thread.path)) return null;
@@ -242,12 +168,13 @@ export async function contextTree(client, currentId) {
       throw new Error("Current conversation identity mismatch");
     threads.set(currentId, { ...thread, archived: false });
   }
-  const lineages = await readLineages(client.env, warnings);
+  const lineages = await readMergeLineages(client.env, warnings);
+  const updateCache = createUpdateCache();
   const frames = new Map();
   const inspected = new Set();
   const snapshotFrames = async (id) => {
     if (frames.has(id)) return frames.get(id);
-    const snapshot = await loadSnapshot(client, id);
+    const snapshot = await loadUpdateSnapshot(client, id, updateCache);
     const frame =
       snapshot.records
         .map((r) => parseGraphItem(JSON.parse(r.json)))
@@ -296,8 +223,8 @@ export async function contextTree(client, currentId) {
         );
         lineages.set(
           thread.id,
-          validate({
-            format: FORMAT,
+          validateMergeLineage({
+            format: LINEAGE_FORMAT,
             threadId: thread.id,
             sources,
             evidence: frame.evidence,
@@ -322,6 +249,37 @@ export async function contextTree(client, currentId) {
     }
   const label = (id) =>
     clean(threads.get(id)?.name || threads.get(id)?.preview || id).slice(0, 96);
+  const updates = new Map();
+  for (const id of family) {
+    const thread = threads.get(id);
+    if (
+      (!lineages.has(id) && id !== currentId) ||
+      thread.missing ||
+      thread.archived ||
+      !thread.path ||
+      ["active", "systemError"].includes(thread.status?.type)
+    )
+      continue;
+    try {
+      const inspection = await inspectMergeUpdates(client, id, {
+        cache: updateCache,
+        lineage: lineages.get(id),
+        threads,
+      });
+      if (inspection.merged) updates.set(id, summarizeUpdates(inspection));
+    } catch (error) {
+      updates.set(id, {
+        sources: [],
+        pendingSources: 0,
+        pendingItems: 0,
+        unavailableSources: 1,
+      });
+      warnings.push(
+        `Could not check updates for ${clean(id)}: ${clean(error.message)}`,
+      );
+    }
+  }
+  const currentUpdates = updates.get(currentId);
   const children = new Map();
   for (const id of family) {
     const primary = parents.get(id)?.[0];
@@ -342,6 +300,29 @@ export async function contextTree(client, currentId) {
     const thread = threads.get(id);
     const sources = parents.get(id) ?? [];
     const merge = lineages.has(id);
+    const sourceUpdate = currentUpdates?.sources.find(
+      (source) => source.id === id,
+    );
+    const ownUpdates = updates.get(id);
+    const badge = ownUpdates?.pendingItems
+      ? ` [${ownUpdates.pendingItems} pending items]`
+      : ownUpdates?.unavailableSources
+        ? " [updates unavailable]"
+        : sourceUpdate?.state === "pending"
+          ? ` [+${sourceUpdate.newItems} pending]`
+          : "";
+    const updateDescription = ownUpdates
+      ? ownUpdates.sources
+          .filter((source) => source.state !== "upToDate")
+          .map((source) =>
+            source.state === "pending"
+              ? `${label(source.id)} +${source.newItems}`
+              : `${label(source.id)}: ${clean(source.reason)}`,
+          )
+          .join("; ")
+      : sourceUpdate?.state === "pending"
+        ? `${sourceUpdate.newItems} items not yet merged into the current chat`
+        : "";
     const relation = merge
       ? "merge ← " + sources.map((p) => `${label(p)} [${p}]`).join(" + ")
       : sources.length
@@ -359,17 +340,19 @@ export async function contextTree(client, currentId) {
             : null;
     rows.push({
       id,
-      name: prefix + connector + label(id),
+      name: prefix + connector + label(id) + badge,
       current: id === currentId,
-      description: `${id} · ${relation}`,
+      description: `${id} · ${relation}${updateDescription ? " · updates: " + updateDescription : ""}`,
       disabledReason,
       search: [
         id,
         label(id),
         merge ? "merge" : sources.length ? "fork" : "root",
+        badge ? "updates pending" : "",
       ].join(" "),
       parents: sources,
       kind: merge ? "merge" : sources.length ? "fork" : "root",
+      ...(ownUpdates ? { updates: ownUpdates } : {}),
     });
     const descendants = children.get(id) ?? [];
     const nextPrefix =
@@ -384,5 +367,15 @@ export async function contextTree(client, currentId) {
     .forEach((id) => visit(id, "", ""));
   // Corrupt/cyclic native ancestry must not make a conversation disappear.
   [...family].sort(order).forEach((id) => visit(id, "", ""));
-  return { currentThreadId: currentId, rows, warnings: warnings.slice(0, 8) };
+  const updateHint = currentUpdates?.pendingSources
+    ? `${currentUpdates.pendingSources} source chats have ${currentUpdates.pendingItems} unmerged items. Run /merge --update to merge their updates.`
+    : currentUpdates?.unavailableSources
+      ? "Some source updates could not be checked. See the tree details before updating."
+      : null;
+  return {
+    currentThreadId: currentId,
+    rows,
+    warnings: warnings.slice(0, 8),
+    updateHint,
+  };
 }

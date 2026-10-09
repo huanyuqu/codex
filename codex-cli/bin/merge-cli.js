@@ -11,8 +11,10 @@ import {
 const HELP = `Merge Codex conversation contexts into a new resumable thread.
 
 Usage: codex merge <BASE_THREAD_ID> <BRANCH_THREAD_ID>... [OPTIONS]
+       codex merge <MERGED_THREAD_ID> --update [OPTIONS]
 
 Options:
+  --update            Merge pending updates from this chat's recorded sources
   --mode <MODE>       auto (default), inline, summary, reference, or legacy
   --context-tokens <N> Whole-context planning budget (uses native window if known)
   --reserve-tokens <N> Reserve for instructions and future dialogue (default: 4096)
@@ -64,9 +66,14 @@ export function parseMergeArgs(args, { allowSinglePrimary = false } = {}) {
       options.help = true;
       continue;
     }
-    if (["--dry-run", "--json", "--resume"].includes(arg)) {
+    if (["--dry-run", "--json", "--resume", "--update"].includes(arg)) {
       options[
-        { "--dry-run": "dryRun", "--json": "json", "--resume": "resume" }[arg]
+        {
+          "--dry-run": "dryRun",
+          "--json": "json",
+          "--resume": "resume",
+          "--update": "update",
+        }[arg]
       ] = true;
     } else if (
       [
@@ -150,12 +157,19 @@ export function parseMergeArgs(args, { allowSinglePrimary = false } = {}) {
     options.maxInputBytes ??= DEFAULT_MAX_INPUT_BYTES;
   }
   if (
-    options.threadIds.length < (allowSinglePrimary ? 1 : 2) ||
+    options.threadIds.length < (allowSinglePrimary || options.update ? 1 : 2) ||
     options.threadIds.length > 32 ||
     new Set(options.threadIds).size !== options.threadIds.length
   )
     throw new Error(
       "Provide 2 to 32 distinct source thread IDs; see codex merge --help",
+    );
+  if (
+    options.update &&
+    (options.threadIds.length !== 1 || options.mode === "legacy")
+  )
+    throw new Error(
+      "--update takes one merged thread ID and cannot be combined with explicit source IDs or legacy mode",
     );
   if (options.name !== undefined && !options.name.trim())
     throw new Error("--name must be non-empty");
@@ -249,6 +263,7 @@ export async function runMergeCommand(binaryPath, env, args) {
     for (const [signal, handler] of handlers) process.off(signal, handler);
     handlers.clear();
     if (options.json) process.stdout.write(`${JSON.stringify(result)}\n`);
+    else if (result.noOp) process.stdout.write(result.message + "\n");
     else {
       process.stdout.write(
         `${result.dryRun ? "Merge preview" : `Merged thread: ${result.threadId}`}\nAdded ${result.importedItems} items; skipped ${result.skippedItems} shared items; ${result.contextBytes} context bytes.\n`,
