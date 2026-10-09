@@ -9,6 +9,8 @@ use super::*;
 use crate::app::WindowsSandboxHost;
 use crate::app_event::ManagedWorktreeMode;
 use crate::app_event::ThreadGoalSetMode;
+use crate::bottom_pane::MultiSelectItem;
+use crate::bottom_pane::MultiSelectPicker;
 use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::slash_commands::BuiltinCommandFlags;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
@@ -145,9 +147,11 @@ impl ChatWidget {
                 || (self.bottom_pane.is_task_running()
                     && (self.mcp_startup_status.is_none()
                         || self.input_queue.user_turn_pending_start))))
-            || (matches!(cmd, SlashCommand::Resume | SlashCommand::Cd)
-                && (self.input_queue.user_turn_pending_start
-                    || self.turn_lifecycle.agent_turn_running))
+            || (matches!(
+                cmd,
+                SlashCommand::Resume | SlashCommand::Cd | SlashCommand::Merge
+            ) && (self.input_queue.user_turn_pending_start
+                || self.turn_lifecycle.agent_turn_running))
             || (cmd == SlashCommand::Export && self.input_queue.suppress_queue_autosend)
             || (cmd == SlashCommand::Review
                 && source == SlashCommandDispatchSource::Live
@@ -312,6 +316,7 @@ impl ChatWidget {
             SlashCommand::Fork => {
                 self.show_session_checkout_picker(ManagedWorktreeMode::Fork, /*name*/ None);
             }
+            SlashCommand::Merge => self.request_conversation_merge(Vec::new()),
             SlashCommand::Worktree => {
                 self.show_managed_worktree_picker();
             }
@@ -1095,6 +1100,10 @@ impl ChatWidget {
                 self.app_event_tx
                     .send(AppEvent::ResumeSessionByIdOrName(args));
             }
+            SlashCommand::Merge if !trimmed.is_empty() => match shlex::split(trimmed) {
+                Some(args) => self.request_conversation_merge(args),
+                None => self.add_error_message("Unclosed quote in /merge arguments.".into()),
+            },
             SlashCommand::Pets
                 if matches!(
                     args.trim().to_ascii_lowercase().as_str(),
@@ -1308,6 +1317,7 @@ impl ChatWidget {
             | SlashCommand::Clear
             | SlashCommand::Resume
             | SlashCommand::Fork
+            | SlashCommand::Merge
             | SlashCommand::Init
             | SlashCommand::Compact
             | SlashCommand::Review
@@ -1337,6 +1347,62 @@ impl ChatWidget {
             | SlashCommand::Tui
             | SlashCommand::Pets => QueueDrain::Stop,
         }
+    }
+
+    fn request_conversation_merge(&mut self, args: Vec<String>) {
+        if self.blocks_direct_input || self.is_external_writer_view() {
+            self.add_error_message("Run /merge from a writable main chat.".into());
+            return;
+        }
+        let Some(primary_thread_id) = self.thread_id else {
+            self.add_error_message(
+                "Session is still starting; try /merge again in a moment.".into(),
+            );
+            return;
+        };
+        self.app_event_tx.send(AppEvent::MergeCurrentSession {
+            primary_thread_id,
+            args,
+        });
+    }
+
+    pub(crate) fn show_conversation_merge_picker(
+        &mut self,
+        primary_thread_id: ThreadId,
+        items: Vec<MultiSelectItem>,
+        args: Vec<String>,
+    ) {
+        let picker = MultiSelectPicker::builder(
+            "Merge branches into this chat".into(),
+            Some("Type to search. Space selects branches; Enter merges; Esc cancels.".into()),
+            self.app_event_tx.clone(),
+        )
+        .list_keymap(self.bottom_pane.list_keymap())
+        .items(items)
+        .require_selection()
+        .on_confirm(move |ids, tx| {
+            tx.send(AppEvent::MergeCurrentSession {
+                primary_thread_id,
+                args: args.iter().cloned().chain(ids.iter().cloned()).collect(),
+            });
+        })
+        .build();
+        self.bottom_pane.show_view(Box::new(picker));
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_conversation_merge_status(&mut self, text: Option<String>) {
+        self.bottom_pane.set_task_running(text.is_some());
+        if let Some(text) = text {
+            self.bottom_pane.ensure_status_indicator();
+            self.set_status(
+                "Merging conversations".into(),
+                Some(text),
+                StatusDetailsCapitalization::Preserve,
+                STATUS_DETAILS_DEFAULT_MAX_LINES,
+            );
+        }
+        self.request_redraw();
     }
 
     fn slash_command_args_elements(

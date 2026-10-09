@@ -1,2 +1,7 @@
 #!/bin/sh
+codex_checkout_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -z "${CODEX_CONTEXT_GRAPH_BINARY:-}" ] && [ -x "$codex_checkout_dir/codex-rs/target/debug/codex" ]; then
+  export CODEX_CONTEXT_GRAPH_BINARY="$codex_checkout_dir/codex-rs/target/debug/codex"
+  export CODEX_CONTEXT_MERGE_NO_DAEMON=1
+fi
 exec node "$(dirname "$0")/codex-cli/bin/codex.js" "$@"

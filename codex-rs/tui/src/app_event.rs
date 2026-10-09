@@ -646,6 +646,12 @@ pub(crate) enum AppEvent {
         name: Option<String>,
     },
 
+    /// Merge saved branches into the captured current thread. Empty args open a picker.
+    MergeCurrentSession {
+        primary_thread_id: ThreadId,
+        args: Vec<String>,
+    },
+
     /// Revert before a selected prompt, retaining its identity across queued history pages.
     RevertSessionForPromptEdit {
         thread_id: ThreadId,

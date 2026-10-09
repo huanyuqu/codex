@@ -106,6 +106,7 @@ impl App {
                     | AppEvent::SelectAgentThread(_)
                     | AppEvent::StartSide { .. }
                     | AppEvent::ForkCurrentSession { .. }
+                    | AppEvent::MergeCurrentSession { .. }
                     | AppEvent::StartManagedWorktree {
                         mode: crate::app_event::ManagedWorktreeMode::Fork,
                         ..
@@ -514,6 +515,14 @@ impl App {
                     }
                     Err(err) => return Err(err),
                 }
+            }
+            AppEvent::MergeCurrentSession {
+                primary_thread_id,
+                args,
+            } => {
+                return self
+                    .merge_current_session(tui, app_server, primary_thread_id, args)
+                    .await;
             }
             AppEvent::ArchiveCurrentThread => {
                 return self.archive_current_thread(tui, app_server).await;

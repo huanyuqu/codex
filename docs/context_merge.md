@@ -21,6 +21,38 @@ selects the modified npm launcher. This implementation uses existing app-server
 APIs; native `thread/merge`, Desktop buttons, and Git working-tree merges are
 outside its current interface.
 
+## Interactive CLI
+
+After building this branch's native CLI, start `./codex` and enter `/merge`.
+The current chat is the primary. Search saved chats, select branches with Space,
+and confirm with Enter; Esc closes the picker. Success opens the new merged chat
+through the existing resume flow.
+
+```text
+/merge B_ID C_ID
+/merge --semantic
+/merge B_ID C_ID --mode summary --semantic --goal "Compare the candidates"
+/merge B_ID C_ID --dry-run
+/merge --help
+```
+
+Options without branch IDs open the picker and carry those options into the
+merge. The engine, graph evidence, context planning, and modes are shared with the
+external command. Esc or Ctrl+C during analysis cancels it and keeps the current
+chat. Failures also keep the current chat. Sources must be local, saved, and idle,
+and the primary must be writable. The slash command inherits the current
+connection and analysis model; `--resume`, `--cd`, `--config`, and `--json` are
+external-command options.
+
+The native TUI routes a Node helper's namespaced JSON-RPC over its own app-server
+connection, so it does not acquire a second writer for the current conversation.
+Hidden analysis streams are delivered to the helper, while other server events
+retain normal TUI routing. Cancellation and helper failures interrupt and release
+helper-owned threads. Node must be available alongside the native CLI; the npm
+launcher supplies the helper path and Node executable.
+
+Build and launcher instructions are in [context_merge_checkout.md](context_merge_checkout.md).
+
 ## The stored graph and the model's context
 
 Consider a primary `A1 → A2 → A3`, a branch `A1 → B2`, and a branch
@@ -269,3 +301,8 @@ Without `CODEX_MERGE_TEST_BINARY`, native tests are skipped. The controlled
 Responses fixtures check native persistence and protocol behavior; a separate
 real-model example checks one generic writing discussion. See [validation](../VALIDATION.md)
 and [checkout instructions](context_merge_checkout.md).
+
+`CODEX_TUI_MERGE_TEST_BINARY` separately enables the Unix terminal integration
+test for this branch's compiled `/merge` implementation. It requires Python 3
+and checks the picker, help, previews, automatic switching, model-visible branch
+content, semantic reading, cancellation, and unchanged source context.

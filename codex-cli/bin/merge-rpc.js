@@ -10,51 +10,24 @@ export class RpcError extends Error {
   }
 }
 
-/** A private app-server connection. Inference is explicit through runTurn. */
-export class AppServerClient {
-  constructor(
-    binaryPath,
-    { env = process.env, config = [], timeoutMs = 30000 } = {},
-  ) {
+/** JSON-RPC and turn streaming over an already connected transport. */
+export class JsonRpcClient {
+  constructor({
+    env = process.env,
+    timeoutMs = 30000,
+    write,
+    signal,
+    idPrefix = "",
+  } = {}) {
     this.env = env;
     this.nextId = 1;
     this.pending = new Map();
     this.notifications = new Set();
     this.timeoutMs = timeoutMs;
     this.failure = null;
-    this.child = spawn(
-      binaryPath,
-      [
-        "app-server",
-        "--listen",
-        "stdio://",
-        ...config.flatMap((value) => ["-c", value]),
-      ],
-      {
-        env,
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-      },
-    );
-    // Drain logs without including potentially private diagnostics in errors.
-    this.child.stderr.resume();
-    this.lines = createInterface({
-      input: this.child.stdout,
-      crlfDelay: Infinity,
-    });
-    this.lines.on("line", (line) => this.receive(line));
-    this.child.on("error", (error) =>
-      this.fail(new Error(`Cannot start Codex app-server: ${error.message}`)),
-    );
-    this.child.stdin.on("error", (error) =>
-      this.fail(new Error(`Codex app-server input closed: ${error.message}`)),
-    );
-    this.exited = new Promise((resolve) => {
-      this.child.once("close", (code, signal) => {
-        this.fail(new Error(`Codex app-server closed (${signal ?? code})`));
-        resolve();
-      });
-    });
+    this.sendMessage = write;
+    this.signal = signal;
+    this.idPrefix = idPrefix;
   }
 
   receive(line) {
@@ -114,6 +87,8 @@ export class AppServerClient {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)
       return Promise.reject(new Error("Invalid inference timeout"));
     if (this.failure) return Promise.reject(this.failure);
+    if (this.signal?.aborted)
+      return Promise.reject(new Error("Conversation merge cancelled"));
     return new Promise((resolve, reject) => {
       let turnId;
       let done = false;
@@ -124,6 +99,7 @@ export class AppServerClient {
         done = true;
         clearTimeout(timer);
         unsubscribe();
+        this.signal?.removeEventListener("abort", onAbort);
         if (error) reject(error);
         else resolve(result);
       };
@@ -207,6 +183,11 @@ export class AppServerClient {
         finish(new Error("Timed out waiting for Codex semantic analysis"));
         interrupt();
       }, timeoutMs);
+      const onAbort = () => {
+        finish(new Error("Conversation merge cancelled"));
+        interrupt();
+      };
+      this.signal?.addEventListener("abort", onAbort, { once: true });
       this.request("turn/start", params).then(
         (result) => {
           turnId = result.turn?.id;
@@ -231,12 +212,19 @@ export class AppServerClient {
 
   write(message) {
     if (this.failure) throw this.failure;
-    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+    this.sendMessage(message);
   }
 
   request(method, params) {
     if (this.failure) return Promise.reject(this.failure);
-    const id = this.nextId++;
+    if (
+      this.signal?.aborted &&
+      !["turn/interrupt", "thread/unsubscribe", "thread/archive"].includes(
+        method,
+      )
+    )
+      return Promise.reject(new Error("Conversation merge cancelled"));
+    const id = this.idPrefix ? this.idPrefix + this.nextId++ : this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
@@ -251,6 +239,51 @@ export class AppServerClient {
         reject(error);
       }
     });
+  }
+}
+
+/** A private app-server connection. Inference is explicit through runTurn. */
+export class AppServerClient extends JsonRpcClient {
+  constructor(
+    binaryPath,
+    { env = process.env, config = [], timeoutMs = 30000 } = {},
+  ) {
+    super({ env, timeoutMs });
+    this.child = spawn(
+      binaryPath,
+      [
+        "app-server",
+        "--listen",
+        "stdio://",
+        ...config.flatMap((value) => ["-c", value]),
+      ],
+      {
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
+    // Drain logs without including potentially private diagnostics in errors.
+    this.child.stderr.resume();
+    this.lines = createInterface({
+      input: this.child.stdout,
+      crlfDelay: Infinity,
+    });
+    this.lines.on("line", (line) => this.receive(line));
+    this.child.on("error", (error) =>
+      this.fail(new Error(`Cannot start Codex app-server: ${error.message}`)),
+    );
+    this.child.stdin.on("error", (error) =>
+      this.fail(new Error(`Codex app-server input closed: ${error.message}`)),
+    );
+    this.exited = new Promise((resolve) => {
+      this.child.once("close", (code, signal) => {
+        this.fail(new Error(`Codex app-server closed (${signal ?? code})`));
+        resolve();
+      });
+    });
+    this.sendMessage = (message) =>
+      this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
   async initialize() {

@@ -11,6 +11,27 @@
 ./codex merge A_ID B_ID C_ID --name "合并讨论" --resume
 ```
 
+也可以在 `./codex` 的聊天界面中直接输入：
+
+```text
+/merge
+```
+
+菜单中输入文字搜索会话，空格选中 B、C，Enter 合并，Esc 取消。当前聊天
+自动作为 A；成功后自动切换到合并后的新聊天，继续输入即可。A、B、C 的
+原始上下文仍然保留。也支持直接指定分支 UUID：
+
+```text
+/merge B_ID C_ID
+/merge B_ID C_ID --dry-run
+/merge B_ID C_ID --semantic --goal "比较两种观点，保留分歧"
+```
+
+`/merge --semantic` 和 `/merge --mode reference` 会先打开同一个分支选择器，
+再用这些选项合并。执行中的 Esc 或 Ctrl+C 取消合并；取消或失败时留在
+当前聊天。当前会话需要空闲、可写，分支需要已保存；当前版本支持本地会话。
+斜杠命令不需要 `--resume`，也不接受 `--cd`、`--config`、`--json`。
+
 例如 A 为 `A1 → A2 → A3`，B 为 `A1 → B2`，C 为 `A1 → A2 → C3`。
 合并后，存档仍记住 `B2` 的父节点是 `A1`、`C3` 的父节点是 `A2`，
 并增加父节点为 `A3、B2、C3` 的 merge 节点。继续对话的新消息接在 merge
@@ -57,12 +78,26 @@ merge 命令输出。可以查看图、分支原文或大消息的一个片段�
 
 ## 运行与开发
 
-当前机器的 `./codex` 已连接官方 Codex 0.162.0 原生二进制。修改位于 npm
-CLI 层，使用现有 app-server API，无需编译 Rust。此功能目前通过 CLI 和
-JavaScript 接口提供；Desktop 中尚无 merge 按钮，也未新增原生 `thread/merge`。
+交互式 `/merge` 需要编译此分支的 Rust CLI。当前机器已具备 Rust 编译环境；
+构建完成后，`./codex` 自动使用 `codex-rs/target/debug/codex` 和本地 Node
+合并模块。全局安装的官方 `codex` 不会自动获得 `/merge`。
+本地 debug 构建没有完整 daemon 安装包，因此 launcher 默认使用进程内
+app-server，无需手动加 `--no-daemon`。
+
+```sh
+cd codex-rs
+cargo build --locked -p codex-cli --bin codex
+cd ..
+./codex
+```
+
+可以用 `CODEX_CONTEXT_GRAPH_BINARY=/absolute/path/to/codex ./codex --no-daemon`
+选择其它本地构建产物。Rust TUI 将合并模块的请求交给当前 app-server 连接，成功后
+通过原生 resume 流程切换聊天；没有新增 `thread/merge` RPC 或 Desktop 按钮。
 
 新 clone 需要 Node.js 22 或更新版本，以及与当前平台对应的原生 Codex 包。
-例如 macOS Apple Silicon 可安装已验证的版本：
+仅使用外部 `./codex merge ...` 命令时，无需编译 Rust。例如 macOS Apple
+Silicon 可安装已验证的版本：
 
 ```sh
 npm install --prefix codex-cli --no-save --package-lock=false \
@@ -78,6 +113,17 @@ npm install --prefix codex-cli --no-save --package-lock=false \
 ```sh
 CODEX_MERGE_TEST_BINARY=/usr/local/bin/codex \
   node --test --test-reporter=spec codex-cli/tests/*.test.js
+```
+
+同时运行原生 `/merge` 终端测试时，指定此分支的构建产物（Unix 及 Python 3）：
+
+```sh
+CODEX_MERGE_TEST_BINARY="$PWD/codex-rs/target/debug/codex" \
+CODEX_TUI_MERGE_TEST_BINARY="$PWD/codex-rs/target/debug/codex" \
+  node --test --test-reporter=spec codex-cli/tests/*.test.js
+
+cd codex-rs
+cargo test --locked -p codex-tui --lib slash_command
 ```
 
 验证范围、真实模型案例及限制见 [VALIDATION.md](../VALIDATION.md)，详细

@@ -34,6 +34,7 @@ pub enum SlashCommand {
     Delete,
     Resume,
     Fork,
+    Merge,
     Worktree,
     App,
     Init,
@@ -102,6 +103,7 @@ impl SlashCommand {
             SlashCommand::Delete => "permanently delete this session",
             SlashCommand::Clear => "clear the terminal and start a new chat",
             SlashCommand::Fork => "fork the current chat",
+            SlashCommand::Merge => "merge saved branches into this chat",
             SlashCommand::Worktree => "start or continue a conversation in a new worktree",
             SlashCommand::App => "continue this session in the Desktop app",
             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
@@ -173,6 +175,7 @@ impl SlashCommand {
                 | SlashCommand::New
                 | SlashCommand::Clear
                 | SlashCommand::Fork
+                | SlashCommand::Merge
                 | SlashCommand::Plan
                 | SlashCommand::Goal
                 | SlashCommand::Voice
@@ -243,6 +246,7 @@ impl SlashCommand {
             SlashCommand::New
             | SlashCommand::Delete
             | SlashCommand::Fork
+            | SlashCommand::Merge
             | SlashCommand::Worktree
             | SlashCommand::Init
             | SlashCommand::Compact
@@ -329,6 +333,15 @@ mod tests {
     use std::str::FromStr;
 
     use super::SlashCommand;
+
+    #[test]
+    fn merge_requires_an_idle_writable_main_thread_and_accepts_args() {
+        assert_eq!(SlashCommand::from_str("merge"), Ok(SlashCommand::Merge));
+        assert!(SlashCommand::Merge.supports_inline_args());
+        assert!(!SlashCommand::Merge.available_during_task());
+        assert!(!SlashCommand::Merge.available_when_thread_unavailable());
+        assert!(!SlashCommand::Merge.available_in_side_conversation());
+    }
 
     #[test]
     fn stop_command_is_canonical_name() {

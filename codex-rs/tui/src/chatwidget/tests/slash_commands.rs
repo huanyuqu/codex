@@ -4,6 +4,118 @@ use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use pretty_assertions::assert_eq;
 use serial_test::serial;
 
+#[tokio::test]
+async fn slash_merge_captures_primary_and_parses_quoted_inline_options() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let primary = ThreadId::new();
+    chat.thread_id = Some(primary);
+    chat.dispatch_command(SlashCommand::Merge);
+    assert_matches!(rx.try_recv(), Ok(AppEvent::MergeCurrentSession { primary_thread_id, args })
+        if primary_thread_id == primary && args.is_empty());
+    chat.dispatch_command_with_args(
+        SlashCommand::Merge,
+        r#"branch-b branch-c --semantic --goal "compare two views""#.into(),
+        Vec::new(),
+    );
+    assert_matches!(rx.try_recv(), Ok(AppEvent::MergeCurrentSession { primary_thread_id, args })
+        if primary_thread_id == primary && args == ["branch-b", "branch-c", "--semantic", "--goal", "compare two views"]);
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn slash_merge_rejects_unavailable_threads_and_unclosed_quotes() {
+    for state in ["starting", "running", "pending", "side", "owned", "quote"] {
+        let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+        chat.thread_id = (state != "starting").then(ThreadId::new);
+        match state {
+            "running" => chat.bottom_pane.set_task_running(true),
+            "pending" => chat.input_queue.user_turn_pending_start = true,
+            "side" => chat.set_side_conversation_active(true),
+            "owned" => chat.set_parent_owned_thread(),
+            _ => {}
+        }
+        chat.dispatch_command_with_args(
+            SlashCommand::Merge,
+            if state == "quote" {
+                "branch --name \"open"
+            } else {
+                "branch"
+            }
+            .into(),
+            Vec::new(),
+        );
+        let cells = drain_insert_history(&mut rx);
+        assert!(!cells.is_empty(), "missing rejection for {state}");
+        assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+        assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    }
+}
+
+#[tokio::test]
+async fn slash_merge_picker_selects_multiple_branches_and_preserves_options() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let primary = ThreadId::new();
+    chat.thread_id = Some(primary);
+    let items = ["branch-b", "branch-c"]
+        .into_iter()
+        .map(|id| crate::bottom_pane::MultiSelectItem {
+            id: id.into(),
+            name: id.into(),
+            ..Default::default()
+        })
+        .collect();
+    chat.show_conversation_merge_picker(primary, items, vec!["--semantic".into()]);
+    for code in [
+        KeyCode::Char(' '),
+        KeyCode::Down,
+        KeyCode::Char(' '),
+        KeyCode::Enter,
+    ] {
+        chat.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+    let mut selection = None;
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::MergeCurrentSession {
+            primary_thread_id,
+            args,
+        } = event
+        {
+            assert_eq!(primary_thread_id, primary);
+            selection = Some(args);
+        }
+    }
+    assert_eq!(
+        selection,
+        Some(vec![
+            "--semantic".into(),
+            "branch-b".into(),
+            "branch-c".into()
+        ])
+    );
+}
+
+#[tokio::test]
+async fn slash_merge_picker_cancel_does_not_dispatch_merge() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let primary = ThreadId::new();
+    chat.thread_id = Some(primary);
+    chat.show_conversation_merge_picker(
+        primary,
+        vec![crate::bottom_pane::MultiSelectItem {
+            id: "branch".into(),
+            name: "branch".into(),
+            ..Default::default()
+        }],
+        Vec::new(),
+    );
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(chat.bottom_pane.no_modal_or_popup_active());
+    while let Ok(event) = rx.try_recv() {
+        assert!(!matches!(event, AppEvent::MergeCurrentSession { .. }));
+    }
+}
+
 fn force_pet_image_support(chat: &mut ChatWidget) {
     chat.set_pet_image_support_for_tests(crate::pets::PetImageSupport::Supported(
         crate::pets::ImageProtocol::Kitty,

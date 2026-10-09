@@ -20,7 +20,8 @@
     "bin/merge-semantic.js",
     "bin/merge-graph.js",
     "bin/merge-views.js",
-    "bin/merge-analysis.js"
+    "bin/merge-analysis.js",
+    "bin/merge-ui.js"
   ],
   "repository": {
     "type": "git",

@@ -42,7 +42,7 @@ Dry runs never call a model or write archives. Evidence can be read with:
   codex merge graph <ARCHIVE_PATH> [--json | --mermaid]
 `;
 
-export function parseMergeArgs(args) {
+export function parseMergeArgs(args, { allowSinglePrimary = false } = {}) {
   const options = {
     threadIds: [],
     config: [],
@@ -164,7 +164,7 @@ export function parseMergeArgs(args) {
     options.maxInputBytes ??= DEFAULT_MAX_INPUT_BYTES;
   }
   if (
-    options.threadIds.length < 2 ||
+    options.threadIds.length < (allowSinglePrimary ? 1 : 2) ||
     options.threadIds.length > 32 ||
     new Set(options.threadIds).size !== options.threadIds.length
   )
@@ -180,6 +180,7 @@ export function parseMergeArgs(args) {
 
 async function resume(binaryPath, env, result, options) {
   const args = [
+    ...(env.CODEX_CONTEXT_MERGE_NO_DAEMON === "1" ? ["--no-daemon"] : []),
     ...options.config.flatMap((value) => ["-c", value]),
     ...(options.cwd ? ["-C", options.cwd] : []),
     "resume",
