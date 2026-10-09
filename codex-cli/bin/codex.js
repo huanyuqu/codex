@@ -237,6 +237,10 @@ delete env.CODEX_MANAGED_BY_BUN;
 delete env.CODEX_MANAGED_BY_PNPM;
 delete env.CODEX_MANAGED_BY_VITE_PLUS;
 env[packageManagerEnvVar] = "1";
+if (process.argv[2] === "merge") {
+  const { runMergeCommand } = await import("./merge-cli.js");
+  process.exit(await runMergeCommand(binaryPath, env, process.argv.slice(3)));
+}
 
 const child = spawn(binaryPath, process.argv.slice(2), {
   stdio: "inherit",
@@ -291,5 +295,13 @@ if (childResult.type === "signal") {
   // semantics (this also sets the correct exit code of 128 + n).
   process.kill(process.pid, childResult.signal);
 } else {
+  if (
+    childResult.exitCode === 0 &&
+    ["--help", "-h"].includes(process.argv[2])
+  ) {
+    process.stdout.write(
+      "\nAdditional command:\n  merge  Merge conversation contexts into a new thread (codex merge --help)\n",
+    );
+  }
   process.exit(childResult.exitCode);
 }

@@ -79,3 +79,7 @@ You can also use Codex with an API key, but this requires [additional setup](htt
 - [**Open source fund**](./docs/open-source-fund.md)
 
 This repository is licensed under the [Apache-2.0 License](LICENSE).
+
+## Conversation graph merge
+
+This fork adds conversation context merging in the npm CLI. See [the merge guide](docs/context_merge.md) and [local checkout instructions](docs/context_merge_checkout.md).
