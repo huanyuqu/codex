@@ -5,6 +5,112 @@ use pretty_assertions::assert_eq;
 use serial_test::serial;
 
 #[tokio::test]
+async fn slash_tree_captures_current_thread_and_optional_target() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let current = ThreadId::new();
+    chat.thread_id = Some(current);
+    chat.dispatch_command(SlashCommand::Tree);
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenContextTree { current_thread_id, target: None }) if current_thread_id == current);
+    chat.dispatch_command_with_args(SlashCommand::Tree, "branch-id".into(), Vec::new());
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenContextTree { current_thread_id, target: Some(target) }) if current_thread_id == current && target == "branch-id");
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn slash_tree_rejects_starting_busy_side_and_invalid_arguments() {
+    for state in ["starting", "running", "pending", "side", "quote", "extra"] {
+        let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+        chat.thread_id = (state != "starting").then(ThreadId::new);
+        match state {
+            "running" => chat.bottom_pane.set_task_running(true),
+            "pending" => chat.input_queue.user_turn_pending_start = true,
+            "side" => chat.set_side_conversation_active(true),
+            _ => {}
+        }
+        let args = match state {
+            "quote" => "\"open",
+            "extra" => "b c",
+            _ => "branch",
+        };
+        chat.dispatch_command_with_args(SlashCommand::Tree, args.into(), Vec::new());
+        assert!(
+            !drain_insert_history(&mut rx).is_empty(),
+            "missing rejection for {state}"
+        );
+        assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+        assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    }
+}
+
+#[tokio::test]
+async fn slash_tree_picker_marks_current_searches_and_switches_without_creating_a_turn() {
+    for search in [false, true] {
+        let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+        let current = ThreadId::new();
+        let branch = ThreadId::new();
+        chat.thread_id = Some(current);
+        let items = [(branch, "Branch B"), (current, "Merged A B C")]
+            .into_iter()
+            .map(|(target_thread_id, name)| SelectionItem {
+                name: name.into(),
+                search_value: Some(name.into()),
+                is_current: target_thread_id == current,
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::SwitchContextBranch {
+                        current_thread_id: current,
+                        target_thread_id,
+                    })
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            })
+            .collect();
+        chat.show_context_tree_picker(items, Some(1));
+        if search {
+            for c in "Branch B".chars() {
+                chat.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+        }
+        chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let mut selected = None;
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::SwitchContextBranch {
+                current_thread_id,
+                target_thread_id,
+            } = event
+            {
+                assert_eq!(current_thread_id, current);
+                selected = Some(target_thread_id);
+            }
+        }
+        assert_eq!(selected, Some(if search { branch } else { current }));
+        assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    }
+}
+
+#[tokio::test]
+async fn slash_tree_picker_cancel_keeps_current_chat() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let current = ThreadId::new();
+    chat.thread_id = Some(current);
+    chat.show_context_tree_picker(
+        vec![SelectionItem {
+            name: "A".into(),
+            is_current: true,
+            ..Default::default()
+        }],
+        Some(0),
+    );
+    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(chat.bottom_pane.no_modal_or_popup_active());
+    while let Ok(event) = rx.try_recv() {
+        assert!(!matches!(event, AppEvent::SwitchContextBranch { .. }));
+    }
+    assert_eq!(chat.thread_id, Some(current));
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
 async fn slash_merge_captures_primary_and_parses_quoted_inline_options() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
     let primary = ThreadId::new();
@@ -14,11 +120,11 @@ async fn slash_merge_captures_primary_and_parses_quoted_inline_options() {
         if primary_thread_id == primary && args.is_empty());
     chat.dispatch_command_with_args(
         SlashCommand::Merge,
-        r#"branch-b branch-c --semantic --goal "compare two views""#.into(),
+        r#"branch-b branch-c --goal "compare two views""#.into(),
         Vec::new(),
     );
     assert_matches!(rx.try_recv(), Ok(AppEvent::MergeCurrentSession { primary_thread_id, args })
-        if primary_thread_id == primary && args == ["branch-b", "branch-c", "--semantic", "--goal", "compare two views"]);
+        if primary_thread_id == primary && args == ["branch-b", "branch-c", "--goal", "compare two views"]);
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
 }
 
@@ -64,7 +170,11 @@ async fn slash_merge_picker_selects_multiple_branches_and_preserves_options() {
             ..Default::default()
         })
         .collect();
-    chat.show_conversation_merge_picker(primary, items, vec!["--semantic".into()]);
+    chat.show_conversation_merge_picker(
+        primary,
+        items,
+        vec!["--goal".into(), "compare views".into()],
+    );
     for code in [
         KeyCode::Char(' '),
         KeyCode::Down,
@@ -87,7 +197,8 @@ async fn slash_merge_picker_selects_multiple_branches_and_preserves_options() {
     assert_eq!(
         selection,
         Some(vec![
-            "--semantic".into(),
+            "--goal".into(),
+            "compare views".into(),
             "branch-b".into(),
             "branch-c".into()
         ])

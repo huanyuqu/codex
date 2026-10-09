@@ -149,7 +149,7 @@ impl ChatWidget {
                         || self.input_queue.user_turn_pending_start))))
             || (matches!(
                 cmd,
-                SlashCommand::Resume | SlashCommand::Cd | SlashCommand::Merge
+                SlashCommand::Resume | SlashCommand::Cd | SlashCommand::Merge | SlashCommand::Tree
             ) && (self.input_queue.user_turn_pending_start
                 || self.turn_lifecycle.agent_turn_running))
             || (cmd == SlashCommand::Export && self.input_queue.suppress_queue_autosend)
@@ -317,6 +317,7 @@ impl ChatWidget {
                 self.show_session_checkout_picker(ManagedWorktreeMode::Fork, /*name*/ None);
             }
             SlashCommand::Merge => self.request_conversation_merge(Vec::new()),
+            SlashCommand::Tree => self.request_context_tree(None),
             SlashCommand::Worktree => {
                 self.show_managed_worktree_picker();
             }
@@ -1104,6 +1105,10 @@ impl ChatWidget {
                 Some(args) => self.request_conversation_merge(args),
                 None => self.add_error_message("Unclosed quote in /merge arguments.".into()),
             },
+            SlashCommand::Tree if !trimmed.is_empty() => match shlex::split(trimmed) {
+                Some(args) if args.len() == 1 => self.request_context_tree(args.into_iter().next()),
+                _ => self.add_error_message("Usage: /tree [THREAD_ID]".into()),
+            },
             SlashCommand::Pets
                 if matches!(
                     args.trim().to_ascii_lowercase().as_str(),
@@ -1318,6 +1323,7 @@ impl ChatWidget {
             | SlashCommand::Resume
             | SlashCommand::Fork
             | SlashCommand::Merge
+            | SlashCommand::Tree
             | SlashCommand::Init
             | SlashCommand::Compact
             | SlashCommand::Review
@@ -1391,12 +1397,51 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    fn request_context_tree(&mut self, target: Option<String>) {
+        if self.active_side_conversation || self.blocks_direct_input {
+            self.add_error_message("Run /tree from a main chat.".into());
+            return;
+        }
+        let Some(current_thread_id) = self.thread_id else {
+            self.add_error_message(
+                "Session is still starting; try /tree again in a moment.".into(),
+            );
+            return;
+        };
+        self.app_event_tx.send(AppEvent::OpenContextTree {
+            current_thread_id,
+            target,
+        });
+    }
+
+    pub(crate) fn show_context_tree_picker(
+        &mut self,
+        items: Vec<SelectionItem>,
+        current: Option<usize>,
+    ) {
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Conversation tree".into()),
+            subtitle: Some("Forks are indented. Merge rows list every source. Type to search; Enter switches; Esc cancels.".into()),
+            items,
+            is_searchable: true,
+            search_placeholder: Some("Search branch name or ID".into()),
+            initial_selected_idx: current,
+            max_visible_rows: 12,
+            ..Default::default()
+        });
+        self.request_redraw();
+    }
+
     pub(crate) fn set_conversation_merge_status(&mut self, text: Option<String>) {
+        self.set_context_operation_status("Merging conversations", text);
+    }
+
+    pub(crate) fn set_context_operation_status(&mut self, title: &str, text: Option<String>) {
         self.bottom_pane.set_task_running(text.is_some());
         if let Some(text) = text {
             self.bottom_pane.ensure_status_indicator();
             self.set_status(
-                "Merging conversations".into(),
+                title.into(),
                 Some(text),
                 StatusDetailsCapitalization::Preserve,
                 STATUS_DETAILS_DEFAULT_MAX_LINES,

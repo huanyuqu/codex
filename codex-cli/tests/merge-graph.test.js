@@ -4,7 +4,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { mergeThreads } from "../bin/merge-context.js";
+import { mergeThreads as mergeThreadsImpl } from "../bin/merge-context.js";
+// These regression cases isolate graph projection from cross-branch synthesis.
+const mergeThreads = (client, options) =>
+  mergeThreadsImpl(client, { semantic: false, ...options });
 import {
   ancestors,
   buildConversationGraph,
@@ -602,7 +605,7 @@ test("CLI accepts graph view and budget options, rejecting unknown modes and inc
     /Unknown merge mode/,
   );
   assert.throws(
-    () => parseMergeArgs(["A", "B", "--mode", "reference", "--semantic"]),
+    () => parseMergeArgs(["A", "B", "--mode", "reference", "--goal", "focus"]),
     /requires/,
   );
 });

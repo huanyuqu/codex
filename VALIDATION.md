@@ -17,7 +17,7 @@ CODEX_TUI_MERGE_TEST_BINARY="$PWD/codex-rs/target/debug/codex" \
   node --test --test-reporter=spec codex-cli/tests/*.test.js
 ```
 
-98 tests passed with no failures or skips in the final regression run.
+108 tests passed with no failures or skips in the final regression run.
 
 The final suite covers the earlier deterministic/task-state merge and the new
 conversation graph compiler. Native integration tests use disposable isolated
@@ -29,8 +29,11 @@ Graph checks cover:
 - Exact `A1 → B2` and `A2 → C3` fork anchors, three merge parents, copied legacy
   identities, unknown ancestry, DAG validation, stable nodes, separate tool
   calls/results, and branch-local call correlations.
-- Short original views with no inference, unchanged source-file hashes, repeated
-  graph reuse, incremental branch updates, post-merge messages, and nested forks.
+- Default short merges with one semantic synthesis call and inline originals,
+  goals without an extra flag, and rejection of the removed flag. Explicit
+  structural-library regressions still isolate projection/reuse without inference.
+- Unchanged source-file hashes, repeated graph reuse, incremental branch updates,
+  post-merge messages, and nested forks.
 - A large single-message branch split into bounded UTF-8 analysis fragments while
   retaining one original node; hierarchical reduction, escaped text, cached
   readings, and bounded model inputs.
@@ -39,6 +42,12 @@ Graph checks cover:
   no-inference dry runs, and no-target failure on invalid model citations.
 - Exact original evidence, large-node byte ranges, branch pagination, bounded
   metadata across 32 sources, graph inspection, and Mermaid output.
+- Session-tree pagination, ancestor/sibling/descendant discovery, unrelated-root
+  filtering, all direct merge parents, independent-root and nested merges, and
+  reachability of fresh compact targets from each original source.
+- Recovery of omitted native fork metadata from plain, reference-backed and zstd
+  rollout headers; older graph merges and inherited capsules; deleted sources,
+  archived branches, missing evidence, invalid lineage, and repeated cursors.
 
 Four native graph tests exercise both legacy and paginated storage. Two create
 staggered forks, compress a long branch, inline another branch's image, restart and
@@ -47,6 +56,8 @@ primary, create a bounded fresh target, preserve all originals, restart, execute
 continuation turn, inspect the outgoing graph context, and merge again while
 preserving all original parent links. They caught and verified the fix for native
 `thread/start` creating its rollout lazily on first injection.
+The first two also exercise default semantic synthesis through the external CLI
+with a controlled provider, without an opt-in flag.
 
 The earlier regression cases retain deterministic merge, task-state compatibility,
 source races, titles, imports/images, restart/resume, rollback/steering,
@@ -66,8 +77,10 @@ letter's contents. C withdrew a draft in which the character read the sealed
 letter and replaced it with an explicitly uncertain guess. A3 asked to retain both
 candidates without choosing a final style.
 
-Forced summary mode generated two branch readings; optional semantic mode then
-generated one cross-branch narrative. The output retained the actual fork
+This earlier real-model validation used forced summary mode and the then-optional
+semantic setting: two branch readings and one cross-branch narrative. Synthesis
+is now the default; this historical case has not been rerun with live credentials.
+The output retained the actual fork
 positions, B's lack of later A2 context, the character's knowledge limits, C's
 withdrawal/correction, the uncertain guess, and the absence of a final style
 choice. It used a generic narrative, not a coding task-state template.
@@ -82,7 +95,7 @@ choice. It used a generic narrative, not a coding task-state template.
 | Original synthetic rollouts unchanged | SHA-256 verified                                    |
 | Staggered fork points                 | Matched exact saved ancestor records                |
 | Restart/resume                        | Passed                                              |
-| Repeated default merge                | Reused the graph, with further inference prohibited |
+| Repeated structural merge             | Reused the graph, with further inference prohibited |
 
 The case used a disposable home linked to existing authentication/configuration
 without printing credentials. It removed synthetic sessions afterward. Saved
@@ -108,25 +121,29 @@ all hidden target instructions and future input.
 ## Interactive CLI validation
 
 `cargo build --locked -p codex-cli --bin codex` successfully builds the native CLI.
-`cargo test --locked -p codex-tui --lib slash_command` passes 192 targeted tests,
+`cargo test --locked -p codex-tui --lib slash_command` passes 197 targeted tests,
 including command availability, quoted arguments, unavailable/busy sessions,
-multiple branch selection, and picker cancellation. This is targeted TUI coverage,
+multiple branch selection, tree search/current selection and picker cancellation. This is targeted TUI coverage,
 not the full Rust workspace suite.
 
-Eight new JavaScript tests exercise the JSONL bridge using a shared app-server
-transport, early streaming notifications, no-inference short merges and previews,
+Nine JavaScript tests exercise the JSONL bridge using a shared app-server
+transport, early streaming notifications, default short synthesis and no-inference previews,
 option-only picker requests, invalid arguments, cancellation before a turn reply,
-and host disconnects.
+host disconnects, and read-only tree discovery. Nine additional tree tests cover
+the session relationships and compatibility paths described above.
 
 The additional native terminal test uses a real Unix PTY, disposable Codex home,
 and controlled Responses provider. It verifies bare `/merge` selecting B and C,
-help and preview, a merge with zero analysis calls, automatic switching, and a
+help and preview, a default merge with one analysis call, automatic switching, and a
 continuation request containing both original branch deltas. A second run selects
 explicit IDs and completes two summaries plus one semantic reading. A third holds
 analysis open, presses Esc, and verifies cancellation while the current rollout
 remains A. Both successful targets retain three merge parents; source conversation
-records remain unchanged. Ordinary native resume appends thread-settings events
-to A's log, so this TUI check compares source context records rather than asserting
+records remain unchanged. It opens `/tree` before merging, searches B's UUID in
+the tree picker after merging, switches B to C with `/tree C_ID`, then returns
+to the saved merge using `/tree M_ID`; rollout identities verify every switch.
+Tree discovery and switching make no model calls. Ordinary native resume appends thread-settings events
+to source logs, so this TUI check compares source context records rather than asserting
 that the entire runtime log is byte-identical.
 
 The checkout launcher selects the local debug build and uses its embedded
@@ -137,13 +154,13 @@ the command/picker and bridge unit tests cover the platform-neutral code.
 
 ## Packaging and source checks
 
-All eleven runtime JavaScript files (the launcher and ten merge modules) are listed
+All twelve runtime JavaScript files (the launcher and eleven graph modules) are listed
 in `codex-cli/package.json`. Targeted formatting, syntax checks, `npm pack
 --dry-run`, and `git diff --check` validate the changed files and package contents.
 The source patch is checked against the pinned Git baseline in an isolated
 checkout, including new graph modules, tests, and documentation. Local source and
 patch hashes are recorded in `.upstream/source-manifest.json`.
 
-The TUI crate now includes the interactive command and bridge. These checks do
+The TUI crate includes `/merge`, `/tree`, and their shared connection bridge. These checks do
 not claim a full Rust workspace test run, a new native RPC endpoint, a Desktop
 merge UI, or merging source Git modifications.

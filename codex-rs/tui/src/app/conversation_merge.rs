@@ -1,4 +1,4 @@
-//! Conversation graph merge for the interactive CLI.
+//! Conversation graph merge and branch navigation for the interactive CLI.
 //!
 //! The Node helper shares the existing graph engine with `codex merge`. Its JSON-RPC requests
 //! use this TUI's app-server connection, preserving ownership of the current thread. Only
@@ -38,6 +38,23 @@ enum MergeMessage {
     Error { message: String },
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextTreeRow {
+    id: String,
+    name: String,
+    description: String,
+    search: String,
+    current: bool,
+    disabled_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ContextTreeResult {
+    rows: Vec<ContextTreeRow>,
+    warnings: Vec<String>,
+}
+
 struct MergeThread {
     ephemeral: bool,
     turn_id: Option<String>,
@@ -65,7 +82,7 @@ impl MergeBridge {
             });
         if !script.is_file() {
             color_eyre::eyre::bail!(
-                "/merge needs the context-graph launcher. Start this checkout with ./codex."
+                "Conversation graph commands need the context-graph launcher. Start this checkout with ./codex."
             );
         }
         let node = std::env::var_os("CODEX_CONTEXT_MERGE_NODE").unwrap_or_else(|| "node".into());
@@ -77,7 +94,9 @@ impl MergeBridge {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .wrap_err("Could not start /merge helper; Node.js 22 or newer is required")?;
+            .wrap_err(
+                "Could not start conversation graph helper; Node.js 22 or newer is required",
+            )?;
         let input = child
             .stdin
             .take()
@@ -253,7 +272,16 @@ impl App {
         self.chat_widget
             .set_conversation_merge_status(Some("Esc cancels.".into()));
         let outcome = self
-            .run_conversation_merge(tui, app_server, &mut bridge, primary_thread_id, args)
+            .run_context_operation(
+                tui,
+                app_server,
+                &mut bridge,
+                json!({
+                    "type": "start", "primaryThreadId": primary_thread_id.to_string(),
+                    "args": args, "model": self.chat_widget.current_model(),
+                }),
+                "Merging conversations",
+            )
             .await;
         self.chat_widget.set_conversation_merge_status(None);
         bridge
@@ -317,20 +345,157 @@ impl App {
         Ok(AppRunControl::Continue)
     }
 
-    async fn run_conversation_merge(
+    pub(super) async fn open_context_tree(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        current_thread_id: ThreadId,
+        target: Option<String>,
+    ) -> Result<AppRunControl> {
+        if self.chat_widget.thread_id() != Some(current_thread_id)
+            || self.chat_widget.is_user_turn_pending_or_running()
+        {
+            self.chat_widget.add_error_message(
+                "Wait for the current chat to be idle, then run /tree again.".into(),
+            );
+            return Ok(AppRunControl::Continue);
+        }
+        if app_server.uses_remote_workspace() {
+            self.chat_widget
+                .add_error_message("/tree currently needs local saved chats.".into());
+            return Ok(AppRunControl::Continue);
+        }
+        let mut bridge = match MergeBridge::start(&self.config) {
+            Ok(bridge) => bridge,
+            Err(error) => {
+                self.chat_widget.add_error_message(format!("{error:#}"));
+                return Ok(AppRunControl::Continue);
+            }
+        };
+        self.chat_widget
+            .set_context_operation_status("Loading conversation tree", Some("Esc cancels.".into()));
+        let outcome = self.run_context_operation(tui, app_server, &mut bridge, json!({
+            "type": "start", "operation": "tree", "primaryThreadId": current_thread_id.to_string(), "args": [],
+        }), "Loading conversation tree").await;
+        self.chat_widget
+            .set_context_operation_status("Loading conversation tree", None);
+        bridge
+            .finish(app_server.request_handle(), matches!(&outcome, Ok(Some(_))))
+            .await;
+        match outcome {
+            Ok(Some(result)) => {
+                let result: ContextTreeResult = serde_json::from_value(result)?;
+                if !result.warnings.is_empty() {
+                    self.chat_widget
+                        .add_info_message(result.warnings.join("\n"), None);
+                }
+                if let Some(target) = target {
+                    match result.rows.iter().find(|row| row.id == target) {
+                        Some(row) if row.disabled_reason.is_none() => {
+                            if let Ok(id) = ThreadId::from_string(&row.id) {
+                                return self.switch_context_branch(tui, app_server, current_thread_id, id).await;
+                            }
+                        }
+                        Some(row) => self.chat_widget.add_error_message(row.disabled_reason.clone().unwrap_or_else(|| "Invalid branch ID".into())),
+                        None => self.chat_widget.add_error_message(format!("'{target}' is not in this conversation tree. Use /resume to open an unrelated chat.")),
+                    }
+                } else {
+                    let current = result.rows.iter().position(|row| row.current);
+                    let items = result
+                        .rows
+                        .into_iter()
+                        .map(|row| {
+                            let id = ThreadId::from_string(&row.id).ok();
+                            let actions: Vec<crate::bottom_pane::SelectionAction> = id
+                                .map(|target_thread_id| {
+                                    Box::new(move |tx: &AppEventSender| {
+                                        tx.send(AppEvent::SwitchContextBranch {
+                                            current_thread_id,
+                                            target_thread_id,
+                                        })
+                                    })
+                                        as crate::bottom_pane::SelectionAction
+                                })
+                                .into_iter()
+                                .collect();
+                            SelectionItem {
+                                name: row.name,
+                                description: Some(row.description),
+                                search_value: Some(row.search),
+                                is_current: row.current,
+                                disabled_reason: row.disabled_reason,
+                                is_disabled: id.is_none(),
+                                actions,
+                                dismiss_on_select: true,
+                                ..Default::default()
+                            }
+                        })
+                        .collect();
+                    self.chat_widget.show_context_tree_picker(items, current);
+                }
+            }
+            Ok(None) => self
+                .chat_widget
+                .add_info_message("Conversation tree cancelled.".into(), None),
+            Err(error) => self
+                .chat_widget
+                .add_error_message(format!("Could not load conversation tree: {error:#}")),
+        }
+        tui.frame_requester().schedule_frame();
+        Ok(AppRunControl::Continue)
+    }
+
+    pub(super) async fn switch_context_branch(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        current_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+    ) -> Result<AppRunControl> {
+        if self.chat_widget.thread_id() != Some(current_thread_id)
+            || self.chat_widget.is_user_turn_pending_or_running()
+            || self
+                .pending_server_profiles
+                .contains_key(&current_thread_id)
+        {
+            self.chat_widget
+                .add_error_message("The current chat changed or is busy. Run /tree again.".into());
+            return Ok(AppRunControl::Continue);
+        }
+        if current_thread_id == target_thread_id {
+            return Ok(AppRunControl::Continue);
+        }
+        match crate::lookup_session_target_with_app_server(
+            app_server,
+            &self.config,
+            &target_thread_id.to_string(),
+        )
+        .await
+        {
+            Ok(Some(target)) => self.resume_target_session(tui, app_server, target).await,
+            Ok(None) => {
+                self.chat_widget.add_error_message(
+                    "The selected branch is no longer available. Run /tree to refresh.".into(),
+                );
+                Ok(AppRunControl::Continue)
+            }
+            Err(error) => {
+                self.chat_widget
+                    .add_error_message(format!("Could not open branch: {error:#}"));
+                Ok(AppRunControl::Continue)
+            }
+        }
+    }
+
+    async fn run_context_operation(
         &mut self,
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
         bridge: &mut MergeBridge,
-        primary_thread_id: ThreadId,
-        args: Vec<String>,
+        start_message: Value,
+        status_title: &str,
     ) -> Result<Option<Value>> {
-        bridge
-            .send(json!({
-                "type": "start", "primaryThreadId": primary_thread_id.to_string(),
-                "args": args, "model": self.chat_widget.current_model(),
-            }))
-            .await?;
+        bridge.send(start_message).await?;
         let mut events = tui.event_stream();
         let mut cancelled = false;
         let mut cancel_deadline = None;
@@ -350,7 +515,7 @@ impl App {
                         }
                         MergeMessage::Progress { text } => {
                             if !cancelled {
-                                self.chat_widget.set_conversation_merge_status(Some(text));
+                                self.chat_widget.set_context_operation_status(status_title, Some(text));
                             }
                         }
                         MergeMessage::Result { result } => return Ok((!cancelled).then_some(result)),
@@ -398,7 +563,7 @@ impl App {
                                 cancelled = true;
                                 cancel_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(10));
                                 bridge.send(json!({"type": "cancel"})).await?;
-                                self.chat_widget.set_conversation_merge_status(Some("Cancelling conversation merge…".into()));
+                                self.chat_widget.set_context_operation_status(status_title, Some("Cancelling…".into()));
                             }
                         }
                         Some(event @ (TuiEvent::Draw | TuiEvent::Resize(_) | TuiEvent::Resume | TuiEvent::FocusGained)) => {

@@ -24,10 +24,10 @@
 ```text
 /merge B_ID C_ID
 /merge B_ID C_ID --dry-run
-/merge B_ID C_ID --semantic --goal "比较两种观点，保留分歧"
+/merge B_ID C_ID --goal "比较两种观点，保留分歧"
 ```
 
-`/merge --semantic` 和 `/merge --mode reference` 会先打开同一个分支选择器，
+`/merge --goal "比较观点"` 和 `/merge --mode reference` 会先打开同一个分支选择器，
 再用这些选项合并。执行中的 Esc 或 Ctrl+C 取消合并；取消或失败时留在
 当前聊天。当前会话需要空闲、可写，分支需要已保存；当前版本支持本地会话。
 斜杠命令不需要 `--resume`，也不接受 `--cd`、`--config`、`--json`。
@@ -49,15 +49,16 @@ Codex 分块生成摘要；预算连摘要分析也容纳不了时保留引用�
 # 完全不调用模型，只加入图关系和原文引用
 ./codex merge A_ID B_ID C_ID --mode reference
 
-# 在图视图之外，额外生成跨分支的通用叙述
-./codex merge A_ID B_ID C_ID --semantic \
+# 指定默认语义融合的关注点
+./codex merge A_ID B_ID C_ID \
   --goal "比较两种方案，保留观点归属和未解决分歧"
 
 # 指定整个上下文的规划上限和后续输入/输出预留
 ./codex merge A_ID B_ID C_ID --context-tokens 32768 --reserve-tokens 4096
 ```
 
-`--semantic` 不再默认输出“已完成、待办、下一步”的代码任务模板。摘要和
+普通 merge 默认调用 Codex 做语义融合，无需额外 flag；短分支保留原文并
+生成融合说明，长分支先做摘要。结果不采用“已完成、待办、下一步”的代码任务模板。摘要和
 融合结果采用叙述及原始节点引用。模型读取和引用检查不能保证每个细节都被
 正确保留，重要细节应查原文。长分支的摘要为文本分析，不会理解存档图片；
 短分支内嵌时图片仍作为原生图片输入。
@@ -76,11 +77,34 @@ merge 命令输出。可以查看图、分支原文或大消息的一个片段�
 存档；后续 merge 需要它恢复原始节点。重复合并未变化的分支会复用图节点；
 有新增内容时只增加新节点及 merge 节点。
 
+## 切换分支
+
+在 CLI 聊天中输入 `/tree`，查看当前会话所属的 fork/merge 关系。
+输入名字或 UUID 搜索，用上下方向键选择，Enter 打开原会话，Esc 取消。
+当前会话有标记，merge 行列出全部来源。例如合并 B、C 后：
+
+```text
+A
+├─ B                 fork ← A
+├─ C                 fork ← A
+└─ M（当前）         merge ← A + B + C
+```
+
+选择 B 后可以接着 B 的原对话聊；在 B 中再次输入 `/tree`，仍能找到 C 和 M。
+也可直接输入 `/tree B_ID` 或 `/tree M_ID`。切换不会创建新分支，也不调用
+模型；无关会话仍用 `/resume` 打开。缩进沿主来源展开，merge 的多父关系
+由行内来源列表保留；消息级的精确 fork 位置可通过 `merge graph` 查阅。
+
+即使 M 因主会话过长而重新创建，也能从来源会话找到它。这个会话级关系
+索引保存在 `~/.codex/merges/lineage/`，遵循 `CODEX_HOME`。旧的 graph merge
+会从保存的上下文与校验过的存档中恢复关系。已删除、归档或忙碌的分支会
+显示为不可选。当前版本支持本地已保存的会话，切换时主会话需要空闲。
+
 ## 运行与开发
 
-交互式 `/merge` 需要编译此分支的 Rust CLI。当前机器已具备 Rust 编译环境；
+交互式 `/merge` 和 `/tree` 需要编译此分支的 Rust CLI。当前机器已具备 Rust 编译环境；
 构建完成后，`./codex` 自动使用 `codex-rs/target/debug/codex` 和本地 Node
-合并模块。全局安装的官方 `codex` 不会自动获得 `/merge`。
+合并模块。全局安装的官方 `codex` 不会自动获得 `/merge` 或 `/tree`。
 本地 debug 构建没有完整 daemon 安装包，因此 launcher 默认使用进程内
 app-server，无需手动加 `--no-daemon`。
 
@@ -128,7 +152,7 @@ cargo test --locked -p codex-tui --lib slash_command
 
 验证范围、真实模型案例及限制见 [VALIDATION.md](../VALIDATION.md)，详细
 设计、预算和参数见 [context_merge.md](context_merge.md)。历史兼容模式为
-`--mode legacy`；其旧任务状态格式为 `--mode legacy --semantic`。
+`--mode legacy`，使用旧任务状态格式。
 
 ## 跟踪 fork 与上游
 

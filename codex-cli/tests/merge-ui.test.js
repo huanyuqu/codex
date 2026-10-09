@@ -17,6 +17,7 @@ async function runBridge(
     cancelAnalysis = false,
     disconnect = false,
     sources = exampleSources(),
+    operation,
   } = {},
 ) {
   const { client } = await fakeGraphClient(t, sources);
@@ -107,7 +108,13 @@ async function runBridge(
       });
     }
   });
-  send({ type: "start", primaryThreadId: "A", args, model: "fixture-reader" });
+  send({
+    type: "start",
+    operation,
+    primaryThreadId: "A",
+    args,
+    model: "fixture-reader",
+  });
   const exitCode = await new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", resolve);
@@ -131,7 +138,7 @@ async function runBridge(
   };
 }
 
-test("TUI bridge merges short branches through the existing connection without inference", async (t) => {
+test("TUI bridge merges short branches with semantic synthesis on the existing connection", async (t) => {
   const { client, result, exitCode } = await runBridge(t, [
     "B",
     "C",
@@ -140,10 +147,12 @@ test("TUI bridge merges short branches through the existing connection without i
   ]);
   assert.equal(exitCode, 0);
   assert.ok(result.threadId);
+  assert.equal(result.modelCalls, 1);
+  assert.ok(result.reading);
   assert.equal(client.threads.get(result.threadId).name, "Two views");
   assert.ok(
     !client.calls.some((call) =>
-      ["model", "initialize", "thread/resume"].includes(call.method),
+      ["initialize", "thread/resume"].includes(call.method),
     ),
   );
   const injection = client.calls.find(
@@ -160,7 +169,6 @@ test("TUI bridge forwards streamed analysis and preserves semantic graph context
     "C",
     "--mode",
     "summary",
-    "--semantic",
   ]);
   assert.equal(exitCode, 0);
   assert.ok(result.threadId);
@@ -179,14 +187,13 @@ test("TUI bridge forwards streamed analysis and preserves semantic graph context
 
 test("TUI merge options without IDs request the branch picker", async (t) => {
   const { client, result, exitCode } = await runBridge(t, [
-    "--semantic",
     "--goal",
     "Compare the views",
   ]);
   assert.equal(exitCode, 0);
   assert.deepEqual(result, {
     selectBranches: true,
-    args: ["--semantic", "--goal", "Compare the views"],
+    args: ["--goal", "Compare the views"],
   });
   assert.equal(client.calls.length, 0);
 });
@@ -216,12 +223,30 @@ test("TUI merge rejects duplicate primary and CLI-only flags before RPC", async 
     ["B", "--resume"],
     ["B", "--cd", "/tmp"],
     ["B", "--config", "model=x"],
+    ["B", "--semantic"],
   ]) {
     const { client, messages, exitCode } = await runBridge(t, args);
     assert.equal(exitCode, 1);
     assert.ok(messages.some((m) => m.type === "error"));
     assert.equal(client.calls.length, 0);
   }
+});
+
+test("TUI tree helper lists related branches through read-only RPC and exits", async (t) => {
+  const { client, result, exitCode } = await runBridge(t, [], {
+    operation: "tree",
+  });
+  assert.equal(exitCode, 0);
+  assert.deepEqual(
+    result.rows.map((r) => r.id),
+    ["A", "B", "C"],
+  );
+  assert.equal(result.rows[0].current, true);
+  assert.ok(
+    client.calls.every((c) =>
+      ["thread/list", "thread/read"].includes(c.method),
+    ),
+  );
 });
 
 test("TUI merge cancellation interrupts analysis and creates no merged thread", async (t) => {

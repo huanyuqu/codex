@@ -35,6 +35,7 @@ pub enum SlashCommand {
     Resume,
     Fork,
     Merge,
+    Tree,
     Worktree,
     App,
     Init,
@@ -104,6 +105,7 @@ impl SlashCommand {
             SlashCommand::Clear => "clear the terminal and start a new chat",
             SlashCommand::Fork => "fork the current chat",
             SlashCommand::Merge => "merge saved branches into this chat",
+            SlashCommand::Tree => "browse and switch conversation branches",
             SlashCommand::Worktree => "start or continue a conversation in a new worktree",
             SlashCommand::App => "continue this session in the Desktop app",
             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
@@ -176,6 +178,7 @@ impl SlashCommand {
                 | SlashCommand::Clear
                 | SlashCommand::Fork
                 | SlashCommand::Merge
+                | SlashCommand::Tree
                 | SlashCommand::Plan
                 | SlashCommand::Goal
                 | SlashCommand::Voice
@@ -227,6 +230,7 @@ impl SlashCommand {
                 | SlashCommand::Clear
                 | SlashCommand::Resume
                 | SlashCommand::Agents
+                | SlashCommand::Tree
                 | SlashCommand::MultiAgents
                 | SlashCommand::Quit
                 | SlashCommand::Exit
@@ -247,6 +251,7 @@ impl SlashCommand {
             | SlashCommand::Delete
             | SlashCommand::Fork
             | SlashCommand::Merge
+            | SlashCommand::Tree
             | SlashCommand::Worktree
             | SlashCommand::Init
             | SlashCommand::Compact
@@ -333,6 +338,15 @@ mod tests {
     use std::str::FromStr;
 
     use super::SlashCommand;
+
+    #[test]
+    fn tree_browses_read_only_main_threads_and_accepts_a_target() {
+        assert_eq!(SlashCommand::from_str("tree"), Ok(SlashCommand::Tree));
+        assert!(SlashCommand::Tree.supports_inline_args());
+        assert!(!SlashCommand::Tree.available_during_task());
+        assert!(SlashCommand::Tree.available_when_thread_unavailable());
+        assert!(!SlashCommand::Tree.available_in_side_conversation());
+    }
 
     #[test]
     fn merge_requires_an_idle_writable_main_thread_and_accepts_args() {

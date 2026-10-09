@@ -107,6 +107,8 @@ impl App {
                     | AppEvent::StartSide { .. }
                     | AppEvent::ForkCurrentSession { .. }
                     | AppEvent::MergeCurrentSession { .. }
+                    | AppEvent::OpenContextTree { .. }
+                    | AppEvent::SwitchContextBranch { .. }
                     | AppEvent::StartManagedWorktree {
                         mode: crate::app_event::ManagedWorktreeMode::Fork,
                         ..
@@ -523,6 +525,12 @@ impl App {
                 return self
                     .merge_current_session(tui, app_server, primary_thread_id, args)
                     .await;
+            }
+            AppEvent::OpenContextTree { current_thread_id, target } => {
+                return self.open_context_tree(tui, app_server, current_thread_id, target).await;
+            }
+            AppEvent::SwitchContextBranch { current_thread_id, target_thread_id } => {
+                return self.switch_context_branch(tui, app_server, current_thread_id, target_thread_id).await;
             }
             AppEvent::ArchiveCurrentThread => {
                 return self.archive_current_thread(tui, app_server).await;

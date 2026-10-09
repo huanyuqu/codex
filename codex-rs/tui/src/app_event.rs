@@ -652,6 +652,18 @@ pub(crate) enum AppEvent {
         args: Vec<String>,
     },
 
+    /// Browse the captured chat's fork/merge family, optionally selecting a thread by ID.
+    OpenContextTree {
+        current_thread_id: ThreadId,
+        target: Option<String>,
+    },
+
+    /// Switch to a selected context branch if the originating chat is still current and idle.
+    SwitchContextBranch {
+        current_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+    },
+
     /// Revert before a selected prompt, retaining its identity across queued history pages.
     RevertSessionForPromptEdit {
         thread_id: ThreadId,

@@ -151,6 +151,20 @@ export async function fakeGraphClient(
     request: async (method, params) => {
       calls.push({ method, params });
       if (method === "config/read") return { config };
+      if (method === "thread/list") {
+        const all = [...threads.values()].filter(
+          (thread) => Boolean(thread.archived) === Boolean(params.archived),
+        );
+        const offset = Number(params.cursor ?? 0);
+        const data = all.slice(offset, offset + params.limit);
+        return {
+          data,
+          nextCursor:
+            offset + data.length < all.length
+              ? String(offset + data.length)
+              : null,
+        };
+      }
       if (method === "thread/read") {
         const thread = threads.get(params.threadId);
         assert.ok(thread, params.threadId);

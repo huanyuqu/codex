@@ -11,8 +11,8 @@ The first source is the primary conversation. Sources remain unchanged.
 # Merge, then continue the saved conversation
 ./codex merge A_ID B_ID C_ID --name "Combined discussion" --resume
 
-# Also ask Codex for a narrative comparing the branches
-./codex merge A_ID B_ID C_ID --semantic \
+# Focus the default semantic synthesis
+./codex merge A_ID B_ID C_ID \
   --goal "Compare the candidates while preserving disagreements"
 ```
 
@@ -30,8 +30,8 @@ through the existing resume flow.
 
 ```text
 /merge B_ID C_ID
-/merge --semantic
-/merge B_ID C_ID --mode summary --semantic --goal "Compare the candidates"
+/merge --goal "Compare the candidates"
+/merge B_ID C_ID --mode summary --goal "Compare the candidates"
 /merge B_ID C_ID --dry-run
 /merge --help
 ```
@@ -52,6 +52,38 @@ helper-owned threads. Node must be available alongside the native CLI; the npm
 launcher supplies the helper path and Node executable.
 
 Build and launcher instructions are in [context_merge_checkout.md](context_merge_checkout.md).
+
+## Switching context branches
+
+Enter `/tree` to browse the current conversation's saved fork/merge family.
+Type a branch name or UUID to search, use Up/Down to select, and press Enter to
+continue that original conversation. Esc cancels. The current conversation is
+marked and initially selected. `/tree THREAD_ID` switches directly to a member
+of this family. `/resume` remains the entry point for unrelated conversations.
+
+For example, after merging B and C into a new M:
+
+```text
+A
+├─ B                      fork ← A
+├─ C                      fork ← A
+└─ M (current)            merge ← A + B + C
+```
+
+The indentation follows the primary source so each conversation appears once;
+every merge row lists all its source parents. Selecting B reopens B, and `/tree`
+in B can still find C and M. This is a session navigator; the message graph's
+precise A1/A2 fork anchors remain in the evidence archive. Switching does not
+create a fork, copy context, or call a model. The existing native resume flow
+restores the selected history and handles writer ownership.
+
+New merges save a small target-to-source index under
+`${CODEX_HOME:-~/.codex}/merges/lineage/`, even when a compact target has no native
+fork parent. It survives visible-history compaction. Older graph merges are
+discovered from their saved capsules and verified evidence when available.
+Deleted sources and archived or busy chats stay visible as disabled rows;
+unavailable older evidence is reported instead of inventing relationships.
+This initial navigator supports local saved chats and requires an idle main chat.
 
 ## The stored graph and the model's context
 
@@ -100,17 +132,17 @@ are embedded without flattening them into new mainline conversation turns.
 | `inline`         | Require all selected originals to fit; fail before model calls if they do not                                                |
 | `summary`        | Require narrative summaries of nonempty selected branches, even when originals are short                                     |
 | `reference`      | Keep branch metadata and original-node references; never call a model                                                        |
-| `legacy`         | Compatibility mode for the earlier flat context merger; `--semantic` selects its earlier task-state format                   |
+| `legacy`         | Compatibility mode using the earlier task-state synthesis format                                                             |
 
-Auto mode can call Codex to compress long material. Optional `--semantic` adds a
-cross-branch narrative after the structural view, preserving attribution,
+Codex synthesizes the branches by default. Auto mode also compresses long material.
+The cross-branch narrative follows the structural view, preserving attribution,
 corrections, uncertainty, and open disagreements. It uses `{text, refs}` rather
-than a fixed completed/pending/next-actions template. It is incompatible with
-reference mode. `--goal` focuses this optional reading and requires `--semantic`.
+than a fixed completed/pending/next-actions template. `--goal` focuses this reading.
+Explicit reference mode skips synthesis and does not accept a goal.
 
 The analysis model defaults to the configured Codex model; `--model` overrides it.
 Existing login/provider configuration is used and normal inference usage applies.
-Short inline merges and reference merges need no inference. Dry runs never call a
+Short inline merges include one cross-branch analysis; reference merges need no inference. Dry runs never call a
 model and report which presentations and analysis would be needed.
 
 ## Budgets and long conversations
@@ -154,7 +186,7 @@ ranges, then summarizes each bounded chunk. Intermediate reductions combine
 bounded readings until a final reading fits. Every analysis uses a fresh
 isolated ephemeral thread, so input does not accumulate between chunks. Analysis
 inputs are capped at 24,576 bytes or a smaller effective budget; normal branch
-readings are capped at 1,536 bytes and can shrink further. The optional cross-branch
+readings are capped at 1,536 bytes and can shrink further. The cross-branch
 reading is capped at 2,048 bytes. A supplied lower option takes precedence.
 
 Encoded images are omitted from the text-only summary input and explicitly

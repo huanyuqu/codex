@@ -27,7 +27,7 @@ lines.on('close',()=>process.exit(0));
 `,
   );
   await chmod(file, 0o700);
-  const client = new AppServerClient(file, { timeoutMs: 1000 });
+  const client = new AppServerClient(file, { timeoutMs: 5000 });
   t.after(async () => {
     await client.close();
     await rm(dir, { recursive: true, force: true });

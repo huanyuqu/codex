@@ -16,7 +16,6 @@ Options:
   --mode <MODE>       auto (default), inline, summary, reference, or legacy
   --context-tokens <N> Whole-context planning budget (uses native window if known)
   --reserve-tokens <N> Reserve for instructions and future dialogue (default: 4096)
-  --semantic          Add an optional cross-branch narrative reading
   --goal <TEXT>       Optional focus for the cross-branch reading
   --model <MODEL>     Analysis model (defaults to configured Codex model)
   --summary-bytes <N> Maximum bytes per conversation reading (default: 16384)
@@ -34,6 +33,7 @@ Options:
 
 The saved graph retains message nodes, fork points, and merge parents. Auto mode
 embeds short branches and reads long branches into bounded narrative summaries.
+Codex synthesizes the branches by default, preserving attributed disagreements.
 Reference mode never calls a model. An oversized primary gets a compact view in
 a fresh thread. All original records remain in the immutable evidence archive.
 Sources must be persisted and idle; branch instructions retain their scopes.
@@ -64,8 +64,7 @@ export function parseMergeArgs(args, { allowSinglePrimary = false } = {}) {
       options.help = true;
       continue;
     }
-    if (arg === "--semantic") options.semantic = true;
-    else if (["--dry-run", "--json", "--resume"].includes(arg)) {
+    if (["--dry-run", "--json", "--resume"].includes(arg)) {
       options[
         { "--dry-run": "dryRun", "--json": "json", "--resume": "resume" }[arg]
       ] = true;
@@ -138,22 +137,9 @@ export function parseMergeArgs(args, { allowSinglePrimary = false } = {}) {
     !["auto", "inline", "summary", "reference", "legacy"].includes(options.mode)
   )
     throw new Error("Unknown merge mode");
+  options.semantic = options.mode !== "reference";
   if (!options.semantic && options.goal !== undefined)
-    throw new Error("Semantic options require --semantic");
-  if (options.semantic && options.mode === "reference")
-    throw new Error("--semantic requires conversation content");
-  if (
-    options.mode === "legacy" &&
-    !options.semantic &&
-    [
-      "model",
-      "summaryBytes",
-      "maxInputBytes",
-      "analysisTimeoutMs",
-      "evidenceDir",
-    ].some((key) => options[key] !== undefined)
-  )
-    throw new Error("Semantic options require --semantic in legacy mode");
+    throw new Error("--goal requires a mode that reads conversation content");
   for (const field of ["goal", "model"])
     if (options[field] !== undefined && !options[field].trim())
       throw new Error("--" + field + " must be non-empty");

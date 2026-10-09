@@ -8,7 +8,10 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 import { AppServerClient } from "../bin/merge-rpc.js";
-import { mergeThreads } from "../bin/merge-context.js";
+import { mergeThreads as mergeThreadsImpl } from "../bin/merge-context.js";
+// These regression cases isolate graph projection from cross-branch synthesis.
+const mergeThreads = (client, options) =>
+  mergeThreadsImpl(client, { semantic: false, ...options });
 import { hash, loadSnapshot } from "../bin/merge-history.js";
 import { expandSnapshot, readEvidence } from "../bin/merge-evidence.js";
 import { parseGraphItem } from "../bin/merge-graph.js";
@@ -334,6 +337,27 @@ for (const historyMode of ["legacy", "paginated"])
         { env },
       );
       assert.equal(JSON.parse(cli.stdout).importedItems, 0);
+      const beforeSynthesis = provider.requests.length;
+      const synthesizedCli = await exec(
+        process.execPath,
+        [
+          launcher,
+          "merge",
+          a.id,
+          c.id,
+          ...config.flatMap((value) => ["-c", value]),
+          "--goal",
+          "Compare both views by default",
+          "--name",
+          "Default synthesis",
+          "--json",
+        ],
+        { env, timeout: 30000 },
+      );
+      const synthesized = JSON.parse(synthesizedCli.stdout);
+      assert.equal(synthesized.modelCalls, 1);
+      assert.ok(synthesized.reading);
+      assert.equal(provider.requests.length, beforeSynthesis + 1);
       const listing = async () =>
         (await client.request("thread/list", { limit: 100 })).data
           .map((thread) => thread.id)

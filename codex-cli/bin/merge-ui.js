@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 import { JsonRpcClient } from "./merge-rpc.js";
 import { parseMergeArgs } from "./merge-cli.js";
 import { mergeThreads } from "./merge-context.js";
+import { contextTree } from "./context-tree.js";
 
 // The TUI owns the native app-server connection. Only requests and results
 // cross this pipe; the existing engine performs the same graph merge as CLI.
@@ -28,6 +29,13 @@ process.stdout.on("error", (error) => {
 
 async function run(message) {
   try {
+    if (message.operation === "tree") {
+      emit({
+        type: "result",
+        result: await contextTree(client, message.primaryThreadId),
+      });
+      return;
+    }
     const options = parseMergeArgs([message.primaryThreadId, ...message.args], {
       allowSinglePrimary: true,
     });
@@ -35,7 +43,7 @@ async function run(message) {
       emit({
         type: "result",
         result: {
-          help: "Usage: /merge [BRANCH_ID...] [--mode auto|inline|summary|reference] [--semantic] [--goal TEXT] [--dry-run]\nThe current chat is the primary. Without branch IDs, /merge opens a multi-select picker. Successful merges open the new chat.",
+          help: "Usage: /merge [BRANCH_ID...] [--mode auto|inline|summary|reference] [--goal TEXT] [--dry-run]\nThe current chat is the primary. Without branch IDs, /merge opens a multi-select picker. Codex synthesizes the branches by default; reference mode does not call a model. Successful merges open the new chat. Use /tree to browse related chats.",
         },
       });
       return;
@@ -76,6 +84,8 @@ lines.on("line", (line) => {
       started = true;
       if (
         typeof message.primaryThreadId !== "string" ||
+        (message.operation !== undefined &&
+          !["merge", "tree"].includes(message.operation)) ||
         !Array.isArray(message.args) ||
         message.args.some((arg) => typeof arg !== "string")
       )

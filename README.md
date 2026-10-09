@@ -82,4 +82,4 @@ This repository is licensed under the [Apache-2.0 License](LICENSE).
 
 ## Conversation graph merge
 
-This fork adds conversation context merging in the npm CLI. See [the merge guide](docs/context_merge.md) and [local checkout instructions](docs/context_merge_checkout.md).
+This fork adds conversation context merging with semantic synthesis by default, interactive `/merge`, and `/tree` branch navigation. See [the merge guide](docs/context_merge.md) and [local checkout instructions](docs/context_merge_checkout.md).
