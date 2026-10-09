@@ -12,7 +12,7 @@ index dbcd86331..536274f07 100644
 +.upstream/
 +*.tgz
 diff --git a/README.md b/README.md
-index 06b02fced..5bc407412 100644
+index 06b02fced..1e0ec66c1 100644
 --- a/README.md
 +++ b/README.md
 @@ -79,3 +79,7 @@ You can also use Codex with an API key, but this requires [additional setup](htt
@@ -22,13 +22,13 @@ index 06b02fced..5bc407412 100644
 +
 +## Conversation graph merge
 +
-+This fork adds conversation context merging with semantic synthesis by default, interactive `/merge`, and `/tree` branch navigation. See [the merge guide](docs/context_merge.md) and [local checkout instructions](docs/context_merge_checkout.md).
++This fork adds conversation context merging with semantic synthesis by default, interactive `/merge`, and `/tree` branch navigation with pending-source indicators. Use `/merge --update` to merge later source changes into a new conversation while preserving current work. See [the merge guide](docs/context_merge.md) and [local checkout instructions](docs/context_merge_checkout.md).
 diff --git a/VALIDATION.md b/VALIDATION.md
 new file mode 100644
-index 000000000..8327691f7
+index 000000000..535f1eb09
 --- /dev/null
 +++ b/VALIDATION.md
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,189 @@
 +# Validation
 +
 +Environment: macOS arm64, Node.js 22.17.0, Rust 1.98.1. The earlier regression
@@ -48,7 +48,7 @@ index 000000000..8327691f7
 +  node --test --test-reporter=spec codex-cli/tests/*.test.js
 +```
 +
-+108 tests passed with no failures or skips in the final regression run.
++129 tests passed with no failures or skips in the final regression run.
 +
 +The final suite covers the earlier deterministic/task-state merge and the new
 +conversation graph compiler. Native integration tests use disposable isolated
@@ -79,6 +79,17 @@ index 000000000..8327691f7
 +- Recovery of omitted native fork metadata from plain, reference-backed and zstd
 +  rollout headers; older graph merges and inherited capsules; deleted sources,
 +  archived branches, missing evidence, invalid lineage, and repeated cursors.
++- Pending-source badges and `/merge --update`: exact source-prefix checks,
++  preservation of subsequent mainline dialogue, unchanged-source tracking across
++  repeated/nested updates, and preventing older imported graphs from regressing
++  incorporated source boundaries. No-op updates and previews perform no inference,
++  create no target and write no archives.
++- Renames and settings events do not advance a source. Rewritten, rolled-back,
++  compacted, deleted, archived or busy sources do not produce a false up-to-date
++  result. Source changes during update analysis fail before target creation.
++- Recovery of ordinary boundaries from older graph evidence, frozen ancestry
++  after verified primary compaction, rejection of rolled-back merge recovery and
++  mismatched lineage/evidence, and oversized update-batch rejection.
 +
 +Four native graph tests exercise both legacy and paginated storage. Two create
 +staggered forks, compress a long branch, inline another branch's image, restart and
@@ -157,11 +168,13 @@ index 000000000..8327691f7
 +multiple branch selection, tree search/current selection and picker cancellation. This is targeted TUI coverage,
 +not the full Rust workspace suite.
 +
-+Nine JavaScript tests exercise the JSONL bridge using a shared app-server
++Eleven JavaScript tests exercise the JSONL bridge using a shared app-server
 +transport, early streaming notifications, default short synthesis and no-inference previews,
 +option-only picker requests, invalid arguments, cancellation before a turn reply,
-+host disconnects, and read-only tree discovery. Nine additional tree tests cover
-+the session relationships and compatibility paths described above.
++host disconnects, read-only tree discovery, and update/no-op routing without a
++picker. Nine additional tree tests cover the session relationships and
++compatibility paths described above. Nineteen update regression cases, including
++three unavailable-source subcases, cover the incremental update behavior.
 +
 +The additional native terminal test uses a real Unix PTY, disposable Codex home,
 +and controlled Responses provider. It verifies bare `/merge` selecting B and C,
@@ -173,6 +186,16 @@ index 000000000..8327691f7
 +records remain unchanged. It opens `/tree` before merging, searches B's UUID in
 +the tree picker after merging, switches B to C with `/tree C_ID`, then returns
 +to the saved merge using `/tree M_ID`; rollout identities verify every switch.
++An additional terminal run continues B after its first merge, returns to M and
++checks the pending-source tree indicator. It verifies an update preview without
++inference, one default semantic update call, automatic switching to the new chat,
++and a continuation request containing both B's new input and M's earlier dialogue.
++Unchanged updates before and after that run make no model calls and keep the same
++rollout identity. B changes only through the explicit continuation; updating its
++merge preserves B's resulting conversation records. Native graph regressions in
++both legacy and paginated storage also use automatic source discovery and check
++the external CLI's no-op update response after restart.
++
 +Tree discovery and switching make no model calls. Ordinary native resume appends thread-settings events
 +to source logs, so this TUI check compares source context records rather than asserting
 +that the entire runtime log is byte-identical.
@@ -185,7 +208,7 @@ index 000000000..8327691f7
 +
 +## Packaging and source checks
 +
-+All twelve runtime JavaScript files (the launcher and eleven graph modules) are listed
++All fourteen runtime JavaScript files (the launcher and thirteen graph modules) are listed
 +in `codex-cli/package.json`. Targeted formatting, syntax checks, `npm pack
 +--dry-run`, and `git diff --check` validate the changed files and package contents.
 +The source patch is checked against the pinned Git baseline in an isolated
@@ -267,23 +290,21 @@ index 934600714..cb7385785 100755
 +  }
    process.exit(childResult.exitCode);
  }
-diff --git a/codex-cli/bin/context-tree.js b/codex-cli/bin/context-tree.js
+diff --git a/codex-cli/bin/context-lineage.js b/codex-cli/bin/context-lineage.js
 new file mode 100644
-index 000000000..5ef44d2d6
+index 000000000..9fb0b2017
 --- /dev/null
-+++ b/codex-cli/bin/context-tree.js
-@@ -0,0 +1,388 @@
++++ b/codex-cli/bin/context-lineage.js
+@@ -0,0 +1,129 @@
 +import { mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
 +import { randomUUID } from "node:crypto";
 +import os from "node:os";
 +import path from "node:path";
-+import * as zlib from "node:zlib";
-+import { promisify } from "node:util";
-+import { loadSnapshot } from "./merge-history.js";
-+import { readEvidence } from "./merge-evidence.js";
-+import { GRAPH_PREFIX, parseGraphItem } from "./merge-graph.js";
++import { hash, snapshotVersion } from "./merge-history.js";
++import { parseGraphItem } from "./merge-graph.js";
 +
-+const FORMAT = "codex-session-lineage-v1";
++export const LINEAGE_FORMAT = "codex-session-lineage-v1";
++const MAX_INDEX_BYTES = 128 * 1024;
 +const directory = (env = process.env) =>
 +  path.join(
 +    env.CODEX_HOME ?? path.join(os.homedir(), ".codex"),
@@ -294,43 +315,60 @@ index 000000000..5ef44d2d6
 +const validId = (id) =>
 +  typeof id === "string" && id.length > 0 && id.length <= 256;
 +
-+function validate(entry) {
++export function validateMergeLineage(entry) {
 +  if (
-+    entry?.format !== FORMAT ||
++    entry?.format !== LINEAGE_FORMAT ||
 +    !validId(entry.threadId) ||
 +    !Array.isArray(entry.sources) ||
 +    entry.sources.length < 2 ||
 +    entry.sources.length > 32 ||
-+    entry.sources.some((s) => !validId(s.id) || s.id === entry.threadId) ||
-+    new Set(entry.sources.map((s) => s.id)).size !== entry.sources.length
++    entry.sources.some(
++      (source) => !validId(source.id) || source.id === entry.threadId,
++    ) ||
++    new Set(entry.sources.map((source) => source.id)).size !==
++      entry.sources.length ||
++    (entry.frameFingerprint !== undefined &&
++      !/^[a-f0-9]{64}$/.test(entry.frameFingerprint))
 +  )
 +    throw new Error("Invalid session merge lineage");
 +  return entry;
 +}
 +
-+// Graph evidence is immutable and created before the native target exists. This
-+// small index binds its merge to the actual saved target, including fresh starts
-+// used for oversized primaries. It also survives compaction of the visible chat.
-+export async function saveMergeLineage(env, threadId, snapshots, summary) {
-+  const entry = validate({
-+    format: FORMAT,
++// Evidence is written before the native target exists. Bind the frozen merge
++// to that target, including compact fresh starts and later context compaction.
++export async function saveMergeLineage(
++  env,
++  threadId,
++  snapshots,
++  summary,
++  persisted,
++) {
++  const frame = persisted?.records.findLast(
++    (record) =>
++      parseGraphItem(JSON.parse(record.json))?.mergeNodeId ===
++      summary.mergeNodeId,
++  );
++  const entry = validateMergeLineage({
++    format: LINEAGE_FORMAT,
 +    threadId,
-+    sources: snapshots.map(({ thread }) => ({
++    sources: snapshots.map(({ thread, records }) => ({
 +      id: thread.id,
 +      name: thread.name ?? null,
 +      forkedFromId: thread.forkedFromId ?? null,
++      snapshot: snapshotVersion(records),
 +    })),
 +    evidence: summary.evidence ?? null,
++    ...(frame ? { frameFingerprint: hash(frame.json) } : {}),
 +  });
++  const text = JSON.stringify(entry) + "\n";
++  if (Buffer.byteLength(text) > MAX_INDEX_BYTES)
++    throw new Error("Oversized lineage index");
 +  const root = directory(env);
 +  await mkdir(root, { recursive: true, mode: 0o700 });
 +  const file = path.join(root, encodeURIComponent(threadId) + ".json");
 +  const temporary = file + "." + randomUUID() + ".tmp";
 +  try {
-+    await writeFile(temporary, JSON.stringify(entry) + "\n", {
-+      flag: "wx",
-+      mode: 0o600,
-+    });
++    await writeFile(temporary, text, { flag: "wx", mode: 0o600 });
 +    await rename(temporary, file);
 +  } finally {
 +    await rm(temporary, { force: true });
@@ -338,7 +376,32 @@ index 000000000..5ef44d2d6
 +  return entry;
 +}
 +
-+async function readLineages(env, warnings) {
++export async function readMergeLineage(env, threadId) {
++  if (!validId(threadId)) throw new Error("Invalid conversation ID");
++  let handle;
++  try {
++    handle = await open(
++      path.join(directory(env), encodeURIComponent(threadId) + ".json"),
++      "r",
++    );
++    const stat = await handle.stat();
++    if (!stat.isFile() || stat.size > MAX_INDEX_BYTES)
++      throw new Error("Oversized lineage index");
++    const entry = validateMergeLineage(
++      JSON.parse(await handle.readFile("utf8")),
++    );
++    if (entry.threadId !== threadId)
++      throw new Error("Lineage identity mismatch");
++    return entry;
++  } catch (error) {
++    if (error.code === "ENOENT") return null;
++    throw error;
++  } finally {
++    await handle?.close();
++  }
++}
++
++export async function readMergeLineages(env, warnings) {
 +  let files;
 +  try {
 +    files = await readdir(directory(env));
@@ -347,27 +410,48 @@ index 000000000..5ef44d2d6
 +    throw error;
 +  }
 +  const entries = new Map();
-+  for (const name of files.filter((f) => f.endsWith(".json")).sort()) {
-+    let handle;
++  for (const name of files.filter((file) => file.endsWith(".json")).sort()) {
 +    try {
-+      handle = await open(path.join(directory(env), name), "r");
-+      const stat = await handle.stat();
-+      if (!stat.isFile() || stat.size > 128 * 1024)
-+        throw new Error("Oversized lineage index");
-+      const entry = validate(JSON.parse(await handle.readFile("utf8")));
-+      if (name !== encodeURIComponent(entry.threadId) + ".json")
++      const id = decodeURIComponent(name.slice(0, -5));
++      if (name !== encodeURIComponent(id) + ".json")
 +        throw new Error("Lineage identity mismatch");
-+      entries.set(entry.threadId, entry);
++      const entry = await readMergeLineage(env, id);
++      if (entry) entries.set(entry.threadId, entry);
 +    } catch (error) {
 +      warnings.push(
 +        `Could not read lineage ${clean(name)}: ${clean(error.message)}`,
 +      );
-+    } finally {
-+      await handle?.close();
 +    }
 +  }
 +  return entries;
 +}
+diff --git a/codex-cli/bin/context-tree.js b/codex-cli/bin/context-tree.js
+new file mode 100644
+index 000000000..41262b535
+--- /dev/null
++++ b/codex-cli/bin/context-tree.js
+@@ -0,0 +1,381 @@
++import { open } from "node:fs/promises";
++import path from "node:path";
++import * as zlib from "node:zlib";
++import { promisify } from "node:util";
++import { readEvidence } from "./merge-evidence.js";
++import { GRAPH_PREFIX, parseGraphItem } from "./merge-graph.js";
++import {
++  LINEAGE_FORMAT,
++  readMergeLineages,
++  validateMergeLineage,
++} from "./context-lineage.js";
++import {
++  createUpdateCache,
++  inspectMergeUpdates,
++  loadUpdateSnapshot,
++  summarizeUpdates,
++} from "./merge-updates.js";
++
++const clean = (value) => String(value ?? "").replace(/[\x00-\x1f\x7f]/g, " ");
++const validId = (id) =>
++  typeof id === "string" && id.length > 0 && id.length <= 256;
 +
 +async function readForkParent(thread) {
 +  if (!thread.path || !path.isAbsolute(thread.path)) return null;
@@ -517,12 +601,13 @@ index 000000000..5ef44d2d6
 +      throw new Error("Current conversation identity mismatch");
 +    threads.set(currentId, { ...thread, archived: false });
 +  }
-+  const lineages = await readLineages(client.env, warnings);
++  const lineages = await readMergeLineages(client.env, warnings);
++  const updateCache = createUpdateCache();
 +  const frames = new Map();
 +  const inspected = new Set();
 +  const snapshotFrames = async (id) => {
 +    if (frames.has(id)) return frames.get(id);
-+    const snapshot = await loadSnapshot(client, id);
++    const snapshot = await loadUpdateSnapshot(client, id, updateCache);
 +    const frame =
 +      snapshot.records
 +        .map((r) => parseGraphItem(JSON.parse(r.json)))
@@ -571,8 +656,8 @@ index 000000000..5ef44d2d6
 +        );
 +        lineages.set(
 +          thread.id,
-+          validate({
-+            format: FORMAT,
++          validateMergeLineage({
++            format: LINEAGE_FORMAT,
 +            threadId: thread.id,
 +            sources,
 +            evidence: frame.evidence,
@@ -597,6 +682,37 @@ index 000000000..5ef44d2d6
 +    }
 +  const label = (id) =>
 +    clean(threads.get(id)?.name || threads.get(id)?.preview || id).slice(0, 96);
++  const updates = new Map();
++  for (const id of family) {
++    const thread = threads.get(id);
++    if (
++      (!lineages.has(id) && id !== currentId) ||
++      thread.missing ||
++      thread.archived ||
++      !thread.path ||
++      ["active", "systemError"].includes(thread.status?.type)
++    )
++      continue;
++    try {
++      const inspection = await inspectMergeUpdates(client, id, {
++        cache: updateCache,
++        lineage: lineages.get(id),
++        threads,
++      });
++      if (inspection.merged) updates.set(id, summarizeUpdates(inspection));
++    } catch (error) {
++      updates.set(id, {
++        sources: [],
++        pendingSources: 0,
++        pendingItems: 0,
++        unavailableSources: 1,
++      });
++      warnings.push(
++        `Could not check updates for ${clean(id)}: ${clean(error.message)}`,
++      );
++    }
++  }
++  const currentUpdates = updates.get(currentId);
 +  const children = new Map();
 +  for (const id of family) {
 +    const primary = parents.get(id)?.[0];
@@ -617,6 +733,29 @@ index 000000000..5ef44d2d6
 +    const thread = threads.get(id);
 +    const sources = parents.get(id) ?? [];
 +    const merge = lineages.has(id);
++    const sourceUpdate = currentUpdates?.sources.find(
++      (source) => source.id === id,
++    );
++    const ownUpdates = updates.get(id);
++    const badge = ownUpdates?.pendingItems
++      ? ` [${ownUpdates.pendingItems} pending items]`
++      : ownUpdates?.unavailableSources
++        ? " [updates unavailable]"
++        : sourceUpdate?.state === "pending"
++          ? ` [+${sourceUpdate.newItems} pending]`
++          : "";
++    const updateDescription = ownUpdates
++      ? ownUpdates.sources
++          .filter((source) => source.state !== "upToDate")
++          .map((source) =>
++            source.state === "pending"
++              ? `${label(source.id)} +${source.newItems}`
++              : `${label(source.id)}: ${clean(source.reason)}`,
++          )
++          .join("; ")
++      : sourceUpdate?.state === "pending"
++        ? `${sourceUpdate.newItems} items not yet merged into the current chat`
++        : "";
 +    const relation = merge
 +      ? "merge ← " + sources.map((p) => `${label(p)} [${p}]`).join(" + ")
 +      : sources.length
@@ -634,17 +773,19 @@ index 000000000..5ef44d2d6
 +            : null;
 +    rows.push({
 +      id,
-+      name: prefix + connector + label(id),
++      name: prefix + connector + label(id) + badge,
 +      current: id === currentId,
-+      description: `${id} · ${relation}`,
++      description: `${id} · ${relation}${updateDescription ? " · updates: " + updateDescription : ""}`,
 +      disabledReason,
 +      search: [
 +        id,
 +        label(id),
 +        merge ? "merge" : sources.length ? "fork" : "root",
++        badge ? "updates pending" : "",
 +      ].join(" "),
 +      parents: sources,
 +      kind: merge ? "merge" : sources.length ? "fork" : "root",
++      ...(ownUpdates ? { updates: ownUpdates } : {}),
 +    });
 +    const descendants = children.get(id) ?? [];
 +    const nextPrefix =
@@ -659,7 +800,17 @@ index 000000000..5ef44d2d6
 +    .forEach((id) => visit(id, "", ""));
 +  // Corrupt/cyclic native ancestry must not make a conversation disappear.
 +  [...family].sort(order).forEach((id) => visit(id, "", ""));
-+  return { currentThreadId: currentId, rows, warnings: warnings.slice(0, 8) };
++  const updateHint = currentUpdates?.pendingSources
++    ? `${currentUpdates.pendingSources} source chats have ${currentUpdates.pendingItems} unmerged items. Run /merge --update to merge their updates.`
++    : currentUpdates?.unavailableSources
++      ? "Some source updates could not be checked. See the tree details before updating."
++      : null;
++  return {
++    currentThreadId: currentId,
++    rows,
++    warnings: warnings.slice(0, 8),
++    updateHint,
++  };
 +}
 diff --git a/codex-cli/bin/merge-analysis.js b/codex-cli/bin/merge-analysis.js
 new file mode 100644
@@ -889,10 +1040,10 @@ index 000000000..5005c18c1
 +}
 diff --git a/codex-cli/bin/merge-cli.js b/codex-cli/bin/merge-cli.js
 new file mode 100644
-index 000000000..b9b000d2a
+index 000000000..7498b4af7
 --- /dev/null
 +++ b/codex-cli/bin/merge-cli.js
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,304 @@
 +import { spawn } from "node:child_process";
 +import path from "node:path";
 +import { AppServerClient } from "./merge-rpc.js";
@@ -906,8 +1057,10 @@ index 000000000..b9b000d2a
 +const HELP = `Merge Codex conversation contexts into a new resumable thread.
 +
 +Usage: codex merge <BASE_THREAD_ID> <BRANCH_THREAD_ID>... [OPTIONS]
++       codex merge <MERGED_THREAD_ID> --update [OPTIONS]
 +
 +Options:
++  --update            Merge pending updates from this chat's recorded sources
 +  --mode <MODE>       auto (default), inline, summary, reference, or legacy
 +  --context-tokens <N> Whole-context planning budget (uses native window if known)
 +  --reserve-tokens <N> Reserve for instructions and future dialogue (default: 4096)
@@ -959,9 +1112,14 @@ index 000000000..b9b000d2a
 +      options.help = true;
 +      continue;
 +    }
-+    if (["--dry-run", "--json", "--resume"].includes(arg)) {
++    if (["--dry-run", "--json", "--resume", "--update"].includes(arg)) {
 +      options[
-+        { "--dry-run": "dryRun", "--json": "json", "--resume": "resume" }[arg]
++        {
++          "--dry-run": "dryRun",
++          "--json": "json",
++          "--resume": "resume",
++          "--update": "update",
++        }[arg]
 +      ] = true;
 +    } else if (
 +      [
@@ -1045,12 +1203,19 @@ index 000000000..b9b000d2a
 +    options.maxInputBytes ??= DEFAULT_MAX_INPUT_BYTES;
 +  }
 +  if (
-+    options.threadIds.length < (allowSinglePrimary ? 1 : 2) ||
++    options.threadIds.length < (allowSinglePrimary || options.update ? 1 : 2) ||
 +    options.threadIds.length > 32 ||
 +    new Set(options.threadIds).size !== options.threadIds.length
 +  )
 +    throw new Error(
 +      "Provide 2 to 32 distinct source thread IDs; see codex merge --help",
++    );
++  if (
++    options.update &&
++    (options.threadIds.length !== 1 || options.mode === "legacy")
++  )
++    throw new Error(
++      "--update takes one merged thread ID and cannot be combined with explicit source IDs or legacy mode",
 +    );
 +  if (options.name !== undefined && !options.name.trim())
 +    throw new Error("--name must be non-empty");
@@ -1144,6 +1309,7 @@ index 000000000..b9b000d2a
 +    for (const [signal, handler] of handlers) process.off(signal, handler);
 +    handlers.clear();
 +    if (options.json) process.stdout.write(`${JSON.stringify(result)}\n`);
++    else if (result.noOp) process.stdout.write(result.message + "\n");
 +    else {
 +      process.stdout.write(
 +        `${result.dryRun ? "Merge preview" : `Merged thread: ${result.threadId}`}\nAdded ${result.importedItems} items; skipped ${result.skippedItems} shared items; ${result.contextBytes} context bytes.\n`,
@@ -1184,15 +1350,16 @@ index 000000000..b9b000d2a
 +}
 diff --git a/codex-cli/bin/merge-context.js b/codex-cli/bin/merge-context.js
 new file mode 100644
-index 000000000..ef2f413e5
+index 000000000..ea472fcd2
 --- /dev/null
 +++ b/codex-cli/bin/merge-context.js
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,431 @@
 +import {
 +  hash,
 +  loadSnapshot,
 +  MERGE_PREFIX,
 +  parseMergeItem,
++  snapshotVersion,
 +} from "./merge-history.js";
 +import {
 +  expandSnapshot,
@@ -1203,7 +1370,12 @@ index 000000000..ef2f413e5
 +import { semanticPlan } from "./merge-semantic.js";
 +import { parseGraphItem } from "./merge-graph.js";
 +import { graphMergePlan } from "./merge-views.js";
-+import { saveMergeLineage } from "./context-tree.js";
++import { saveMergeLineage } from "./context-lineage.js";
++import {
++  inspectMergeUpdates,
++  restoreCompactedGraph,
++  summarizeUpdates,
++} from "./merge-updates.js";
 +
 +export const DEFAULT_MAX_BYTES = 512 * 1024;
 +
@@ -1336,13 +1508,14 @@ index 000000000..ef2f413e5
 +
 +/** Merge into a fresh, durable native fork. All source threads remain readable. */
 +export async function mergeThreads(client, options = {}) {
-+  const { threadIds, maxBytes, name, dryRun = false, cwd } = options;
++  let { threadIds } = options;
++  const { maxBytes, name, dryRun = false, cwd } = options;
 +  const mode = options.mode ?? "auto";
 +  const semantic = options.semantic ?? mode !== "reference";
 +  options = { ...options, mode, semantic };
 +  if (
 +    !Array.isArray(threadIds) ||
-+    threadIds.length < 2 ||
++    threadIds.length < (options.update ? 1 : 2) ||
 +    threadIds.length > 32 ||
 +    threadIds.some((id) => typeof id !== "string" || !id.length) ||
 +    new Set(threadIds).size !== threadIds.length
@@ -1395,13 +1568,75 @@ index 000000000..ef2f413e5
 +    )
 +      throw new Error(field + " must be non-empty");
 +  }
++  let updateInspection;
++  if (options.update) {
++    if (threadIds.length !== 1 || mode === "legacy")
++      throw new Error(
++        "--update takes only the current/base thread ID and requires a graph merge mode",
++      );
++    updateInspection = await inspectMergeUpdates(client, threadIds[0]);
++    if (!updateInspection.merged)
++      throw new Error(
++        "--update needs a previously merged chat; use /merge with source IDs first",
++      );
++    const blocked = updateInspection.sources.filter((source) =>
++      ["changed", "unavailable"].includes(source.state),
++    );
++    if (blocked.length)
++      throw new Error(
++        "Cannot update all sources: " +
++          blocked.map((source) => `${source.id}: ${source.reason}`).join("; "),
++      );
++    const pending = updateInspection.sources.filter(
++      (source) => source.state === "pending",
++    );
++    if (!pending.length)
++      return {
++        dryRun,
++        noOp: true,
++        threadId: threadIds[0],
++        message: "All merged sources are up to date. No new chat was created.",
++        importedItems: 0,
++        skippedItems: 0,
++        contextBytes: 0,
++        modelCalls: 0,
++        updates: summarizeUpdates(updateInspection),
++      };
++    threadIds = [threadIds[0], ...pending.map((source) => source.id)];
++    if (threadIds.length > 32)
++      throw new Error(
++        "More than 31 sources have updates; merge them explicitly in batches",
++      );
++    options = { ...options, threadIds };
++  }
 +  const nativeSnapshots = [];
 +  for (const id of threadIds)
 +    nativeSnapshots.push(await loadSnapshot(client, id));
++  if (updateInspection) {
++    const expected = new Map([
++      [threadIds[0], snapshotVersion(updateInspection.primarySnapshot.records)],
++      ...updateInspection.sources.map((source) => [source.id, source.snapshot]),
++    ]);
++    for (const snapshot of nativeSnapshots)
++      if (
++        JSON.stringify(snapshotVersion(snapshot.records)) !==
++        JSON.stringify(expected.get(snapshot.thread.id))
++      )
++        throw new Error(
++          "Source changed while checking updates; retry when all sources are idle",
++        );
++  }
 +  const snapshots = [];
 +  const evidenceCache = new Map();
-+  for (const snapshot of nativeSnapshots)
-+    snapshots.push(await expandSnapshot(snapshot, evidenceCache));
++  for (const snapshot of nativeSnapshots) {
++    let expanded = await expandSnapshot(snapshot, evidenceCache);
++    if (!snapshots.length && updateInspection)
++      expanded = restoreCompactedGraph(expanded, updateInspection);
++    snapshots.push({
++      ...expanded,
++      nativeVersion: snapshotVersion(snapshot.records),
++    });
++  }
 +  let plan;
 +  if (mode === "legacy") {
 +    plan = planMerge(snapshots, {
@@ -1410,7 +1645,20 @@ index 000000000..ef2f413e5
 +    if (semantic) plan = await semanticPlan(client, snapshots, plan, options);
 +  } else
 +    plan = await graphMergePlan(client, snapshots, nativeSnapshots, options);
++  if (updateInspection)
++    plan.summary.updates = summarizeUpdates(updateInspection);
 +  if (dryRun) return { dryRun: true, ...plan.summary };
++  if (updateInspection)
++    for (const snapshot of nativeSnapshots) {
++      const current = await loadSnapshot(client, snapshot.thread.id);
++      if (
++        JSON.stringify(snapshotVersion(current.records)) !==
++        JSON.stringify(snapshotVersion(snapshot.records))
++      )
++        throw new Error(
++          "Source changed during update analysis; retry when all sources are idle",
++        );
++    }
 +  let target;
 +  try {
 +    if (plan.primaryEmbedded) {
@@ -1520,6 +1768,7 @@ index 000000000..ef2f413e5
 +      target.id,
 +      nativeSnapshots,
 +      plan.summary,
++      persisted,
 +    );
 +    await client.request("thread/unsubscribe", { threadId: target.id });
 +    return { dryRun: false, threadId: target.id, ...plan.summary };
@@ -2285,14 +2534,13 @@ index 000000000..0f11d5a88
 +}
 diff --git a/codex-cli/bin/merge-graph.js b/codex-cli/bin/merge-graph.js
 new file mode 100644
-index 000000000..36fa26f7e
+index 000000000..a1e3e0457
 --- /dev/null
 +++ b/codex-cli/bin/merge-graph.js
-@@ -0,0 +1,467 @@
-+import { hash, recordRef } from "./merge-history.js";
+@@ -0,0 +1,480 @@
++import { GRAPH_PREFIX, hash, recordRef } from "./merge-history.js";
 +
-+export const GRAPH_PREFIX =
-+  "Codex conversation graph merge (quoted branch history):\n";
++export { GRAPH_PREFIX };
 +export const FUSION_PREFIX =
 +  "Codex conversation graph synthesis (model-generated reading):\n";
 +export const GRAPH_FORMAT = "codex-conversation-graph-v1";
@@ -2718,9 +2966,22 @@ index 000000000..36fa26f7e
 +  const records = graph.nodes
 +    .filter((n) => n.recordRef)
 +    .map((n) => catalog.get(n.recordRef));
-+  const contexts = new Map(
-+    snapshots.flatMap((s) => [...(s.contexts?.entries() ?? [])]),
-+  );
++  const contexts = new Map();
++  for (const snapshot of snapshots)
++    for (const [id, context] of snapshot.contexts ?? []) {
++      const previous = contexts.get(id);
++      // An older imported graph must not move an already incorporated source
++      // boundary backwards. Explicit sources below establish their CURRENT
++      // boundary, including intentional rollback/replacement remerges.
++      contexts.set(
++        id,
++        previous?.snapshot &&
++          (!context.snapshot ||
++            previous.snapshot.recordCount > context.snapshot.recordCount)
++          ? { ...context, snapshot: previous.snapshot }
++          : context,
++      );
++    }
 +  for (const snapshot of snapshots)
 +    contexts.set(snapshot.thread.id, {
 +      id: snapshot.thread.id,
@@ -2728,6 +2989,7 @@ index 000000000..36fa26f7e
 +      cwd: snapshot.thread.cwd,
 +      gitInfo: snapshot.thread.gitInfo ?? null,
 +      forkedFromId: snapshot.thread.forkedFromId ?? null,
++      ...(snapshot.nativeVersion ? { snapshot: snapshot.nativeVersion } : {}),
 +    });
 +  const archive = {
 +    format: "codex-merge-evidence-v1",
@@ -2758,10 +3020,10 @@ index 000000000..36fa26f7e
 +}
 diff --git a/codex-cli/bin/merge-history.js b/codex-cli/bin/merge-history.js
 new file mode 100644
-index 000000000..55f04a899
+index 000000000..ea29f2aee
 --- /dev/null
 +++ b/codex-cli/bin/merge-history.js
-@@ -0,0 +1,449 @@
+@@ -0,0 +1,475 @@
 +import { createHash } from "node:crypto";
 +import { open } from "node:fs/promises";
 +import path from "node:path";
@@ -2769,8 +3031,18 @@ index 000000000..55f04a899
 +import { promisify } from "node:util";
 +
 +export const MERGE_PREFIX = "Codex context merge (historical branch data):\n";
++export const GRAPH_PREFIX =
++  "Codex conversation graph merge (quoted branch history):\n";
 +const MAX_ROLLOUT_BYTES = 64 * 1024 * 1024;
 +export const hash = (value) => createHash("sha256").update(value).digest("hex");
++
++// Runtime settings and token-count events do not advance a conversation. Keep
++// the exact retained ResponseItem prefix so rollback and compaction are not
++// mistaken for newly appended dialogue.
++export const snapshotVersion = (records) => ({
++  recordCount: records.length,
++  sha256: hash(JSON.stringify(records.map((record) => record.json))),
++});
 +export const recordRef = (record) =>
 +  "r_" + hash(record.key + "\n" + record.json).slice(0, 24);
 +
@@ -3039,6 +3311,7 @@ index 000000000..55f04a899
 +  let records = [];
 +  let inProgress = false;
 +  let hasCompaction = false;
++  const compactedGraphRecords = new Map();
 +  let currentTurnId = null;
 +  let tokenUsage = null;
 +  const base = meta.payload.history_base;
@@ -3058,6 +3331,8 @@ index 000000000..55f04a899
 +    inProgress = parent.inProgress;
 +    currentTurnId = parent.currentTurnId;
 +    hasCompaction = parent.hasCompaction;
++    for (const record of parent.compactedGraphRecords ?? [])
++      compactedGraphRecords.set(record.fingerprint, record);
 +    tokenUsage = parent.tokenUsage;
 +  }
 +  const append = (item, raw, ordinal) => {
@@ -3153,6 +3428,18 @@ index 000000000..55f04a899
 +      append({ type: line.type }, raw, line.ordinal ?? index);
 +    else if (line.type === "compacted") {
 +      tokenUsage = null;
++      for (const record of records) {
++        const item = JSON.parse(record.json);
++        if (
++          item.type === "message" &&
++          item.role === "user" &&
++          item.content?.[0]?.text?.startsWith(GRAPH_PREFIX)
++        )
++          compactedGraphRecords.set(record.fingerprint, {
++            fingerprint: record.fingerprint,
++            json: record.json,
++          });
++      }
 +      // Import the compacted context rather than resurrecting discarded items.
 +      hasCompaction = true;
 +      const replacement = payload.replacement_history;
@@ -3208,6 +3495,7 @@ index 000000000..55f04a899
 +    inProgress,
 +    currentTurnId,
 +    hasCompaction,
++    compactedGraphRecords: [...compactedGraphRecords.values()],
 +    tokenUsage,
 +  };
 +}
@@ -4084,10 +4372,10 @@ index 000000000..c73325dab
 +}
 diff --git a/codex-cli/bin/merge-ui.js b/codex-cli/bin/merge-ui.js
 new file mode 100644
-index 000000000..9609d23e7
+index 000000000..a078c6cbd
 --- /dev/null
 +++ b/codex-cli/bin/merge-ui.js
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,114 @@
 +import { randomUUID } from "node:crypto";
 +import { createInterface } from "node:readline";
 +import { JsonRpcClient } from "./merge-rpc.js";
@@ -4133,7 +4421,7 @@ index 000000000..9609d23e7
 +      emit({
 +        type: "result",
 +        result: {
-+          help: "Usage: /merge [BRANCH_ID...] [--mode auto|inline|summary|reference] [--goal TEXT] [--dry-run]\nThe current chat is the primary. Without branch IDs, /merge opens a multi-select picker. Codex synthesizes the branches by default; reference mode does not call a model. Successful merges open the new chat. Use /tree to browse related chats.",
++          help: "Usage: /merge [BRANCH_ID...] [--mode auto|inline|summary|reference] [--goal TEXT] [--dry-run]\n       /merge --update [--dry-run]\nThe current chat is the primary. Without branch IDs, /merge opens a multi-select picker. --update merges new context from recorded sources; unchanged sources create no new chat or model call. Codex synthesizes the branches by default; reference mode does not call a model. Successful merges open the new chat. Use /tree to browse related chats and pending updates.",
 +        },
 +      });
 +      return;
@@ -4142,7 +4430,7 @@ index 000000000..9609d23e7
 +      throw new Error(
 +        "/merge uses the current CLI connection; omit --config, --cd, --resume and --json",
 +      );
-+    if (options.threadIds.length === 1) {
++    if (options.threadIds.length === 1 && !options.update) {
 +      emit({
 +        type: "result",
 +        result: { selectBranches: true, args: message.args },
@@ -4152,7 +4440,9 @@ index 000000000..9609d23e7
 +    options.model ??= message.model;
 +    emit({
 +      type: "progress",
-+      text: "Merging conversation context; long branches may need summaries. Esc cancels.",
++      text: options.update
++        ? "Checking recorded sources and merging pending updates. Esc cancels."
++        : "Merging conversation context; long branches may need summaries. Esc cancels.",
 +    });
 +    const result = await mergeThreads(client, options);
 +    emit({ type: "result", result });
@@ -4200,6 +4490,215 @@ index 000000000..9609d23e7
 +    process.exitCode = 1;
 +  }
 +});
+diff --git a/codex-cli/bin/merge-updates.js b/codex-cli/bin/merge-updates.js
+new file mode 100644
+index 000000000..15d57d465
+--- /dev/null
++++ b/codex-cli/bin/merge-updates.js
+@@ -0,0 +1,203 @@
++import { loadSnapshot, snapshotVersion } from "./merge-history.js";
++import { expandSnapshot, readEvidence } from "./merge-evidence.js";
++import { readMergeLineage } from "./context-lineage.js";
++import { parseGraphItem } from "./merge-graph.js";
++
++export const createUpdateCache = () => ({
++  snapshots: new Map(),
++  expanded: new Map(),
++  evidence: new Map(),
++});
++
++export function loadUpdateSnapshot(client, id, cache) {
++  if (!cache.snapshots.has(id))
++    cache.snapshots.set(id, loadSnapshot(client, id));
++  return cache.snapshots.get(id);
++}
++
++function validVersion(version) {
++  return (
++    Number.isSafeInteger(version?.recordCount) &&
++    version.recordCount >= 0 &&
++    /^[a-f0-9]{64}$/.test(version.sha256 ?? "")
++  );
++}
++
++function archivedVersion(archive, branch, lineage) {
++  const version =
++    archive.sources.find((source) => source.id === branch.threadId)?.snapshot ??
++    lineage?.sources.find((source) => source.id === branch.threadId)?.snapshot;
++  if (version !== undefined) {
++    if (!validVersion(version))
++      throw new Error("Invalid merged source snapshot");
++    return version;
++  }
++  // Older graph archives did not save native snapshot digests. Exact original
++  // paths can recover ordinary sources; a path containing a merge needs an
++  // explicit remerge to establish its native boundary.
++  const nodes = new Map(archive.graph.nodes.map((node) => [node.id, node]));
++  const records = new Map(
++    archive.records.map((record) => [record.ref, record]),
++  );
++  if (branch.path.some((id) => !nodes.get(id)?.recordRef))
++    throw new Error(
++      "This older merged source has no saved update boundary; merge it explicitly once",
++    );
++  return snapshotVersion(
++    branch.path.map((id) => records.get(nodes.get(id).recordRef)),
++  );
++}
++
++async function archivedSourceIds(client) {
++  const archived = new Set();
++  const cursors = new Set();
++  let cursor = null;
++  do {
++    const result = await client.request("thread/list", {
++      cursor,
++      limit: 100,
++      modelProviders: [],
++      sourceKinds: [],
++      archived: true,
++    });
++    if (!Array.isArray(result.data))
++      throw new Error("Invalid archived conversation list");
++    for (const thread of result.data) archived.add(thread.id);
++    cursor = result.nextCursor ?? null;
++    if (cursor !== null && (typeof cursor !== "string" || cursors.has(cursor)))
++      throw new Error("Invalid or repeated archived conversation list cursor");
++    cursors.add(cursor);
++  } while (cursor !== null);
++  return archived;
++}
++
++/** Compare frozen merged source prefixes, never timestamps or mutable names. */
++export async function inspectMergeUpdates(
++  client,
++  currentId,
++  { cache = createUpdateCache(), lineage, threads } = {},
++) {
++  const primarySnapshot = await loadUpdateSnapshot(client, currentId, cache);
++  if (!cache.expanded.has(currentId))
++    cache.expanded.set(
++      currentId,
++      expandSnapshot(primarySnapshot, cache.evidence),
++    );
++  const primary = await cache.expanded.get(currentId);
++  const frame = primary.graphCapsules.at(-1);
++  let archive;
++  let recovered = false;
++  if (frame) {
++    const key = frame.evidence.path + ":" + frame.evidence.sha256;
++    archive = cache.evidence.get(key) ?? (await readEvidence(frame.evidence));
++  } else {
++    lineage ??= await readMergeLineage(client.env, currentId);
++    const compacted = lineage?.frameFingerprint
++      ? primarySnapshot.compactedGraphRecords.find(
++          (record) => record.fingerprint === lineage.frameFingerprint,
++        )
++      : primarySnapshot.compactedGraphRecords.at(-1);
++    if (!compacted && lineage?.evidence)
++      throw new Error(
++        "The saved merge is no longer in this chat's retained history; use /merge with explicit source IDs",
++      );
++    if (!compacted) return { merged: false, sources: [], primarySnapshot };
++    const retainedFrame = parseGraphItem(JSON.parse(compacted.json));
++    if (
++      lineage?.evidence &&
++      JSON.stringify(retainedFrame?.evidence) !==
++        JSON.stringify(lineage.evidence)
++    )
++      throw new Error(
++        "Compacted merge evidence does not match its saved lineage",
++      );
++    archive = await readEvidence(retainedFrame.evidence);
++    if (archive.graph?.mergeNodeId !== retainedFrame.mergeNodeId)
++      throw new Error("Compacted merge evidence does not match its graph node");
++    recovered = true;
++  }
++  if (!archive.graph) return { merged: false, sources: [], primarySnapshot };
++  // thread/read does not expose the archived flag on native Thread objects.
++  // Tree discovery already has this inventory; standalone updates query it.
++  const archived = threads ? null : await archivedSourceIds(client);
++  const sources = [];
++  for (const branch of archive.graph.branches) {
++    if (branch.threadId === currentId) continue;
++    const source = {
++      id: branch.threadId,
++      name: branch.name ?? null,
++      newItems: 0,
++    };
++    try {
++      const listed = threads?.get(branch.threadId);
++      if (threads && !listed)
++        throw new Error("Source chat is no longer available");
++      if (listed?.archived || archived?.has(branch.threadId))
++        throw new Error("Source chat is archived");
++      const baseline = archivedVersion(archive, branch, lineage);
++      const snapshot = await loadUpdateSnapshot(client, branch.threadId, cache);
++      if (snapshot.thread.archived) throw new Error("Source chat is archived");
++      source.name = snapshot.thread.name ?? source.name;
++      source.snapshot = snapshotVersion(snapshot.records);
++      if (
++        snapshot.records.length < baseline.recordCount ||
++        snapshotVersion(snapshot.records.slice(0, baseline.recordCount))
++          .sha256 !== baseline.sha256
++      ) {
++        source.state = "changed";
++        source.reason =
++          "Source history was rolled back, replaced or compacted; merge this source explicitly";
++      } else {
++        source.newItems = snapshot.records.length - baseline.recordCount;
++        source.state = source.newItems ? "pending" : "upToDate";
++      }
++    } catch (error) {
++      source.state = "unavailable";
++      source.reason = error.message;
++    }
++    sources.push(source);
++  }
++  return { merged: true, sources, primarySnapshot, archive, recovered };
++}
++
++export function summarizeUpdates(inspection) {
++  const sources = inspection.sources.map(
++    ({ id, name, state, newItems, reason }) => ({
++      id,
++      name,
++      state,
++      newItems,
++      ...(reason ? { reason } : {}),
++    }),
++  );
++  return {
++    sources,
++    pendingSources: sources.filter((source) => source.state === "pending")
++      .length,
++    pendingItems: sources.reduce((sum, source) => sum + source.newItems, 0),
++    unavailableSources: sources.filter((source) =>
++      ["changed", "unavailable"].includes(source.state),
++    ).length,
++  };
++}
++
++// A proven native compaction can remove the visible capsule. Preserve its
++// frozen graph as ancestry, while keeping the CURRENT compacted text as the
++// primary model input. A rollback cannot reactivate this evidence.
++export function restoreCompactedGraph(primary, inspection) {
++  if (!inspection.recovered) return primary;
++  const { archive } = inspection;
++  return {
++    ...primary,
++    timeline: [archive.graph.mergeNodeId, ...primary.timeline],
++    graphs: [...primary.graphs, archive.graph],
++    graphRecords: new Map([
++      ...archive.records.map((record) => [record.ref, record]),
++      ...primary.graphRecords,
++    ]),
++    contexts: new Map([
++      ...archive.sources.map((source) => [source.id, source]),
++      ...primary.contexts,
++    ]),
++  };
++}
 diff --git a/codex-cli/bin/merge-views.js b/codex-cli/bin/merge-views.js
 new file mode 100644
 index 000000000..51863f528
@@ -4919,10 +5418,10 @@ index 000000000..51863f528
 +  };
 +}
 diff --git a/codex-cli/package.json b/codex-cli/package.json
-index 7d3a49405..81d8182e3 100644
+index 7d3a49405..e761913c2 100644
 --- a/codex-cli/package.json
 +++ b/codex-cli/package.json
-@@ -11,7 +11,18 @@
+@@ -11,7 +11,20 @@
      "node": ">=16"
    },
    "files": [
@@ -4938,7 +5437,9 @@ index 7d3a49405..81d8182e3 100644
 +    "bin/merge-views.js",
 +    "bin/merge-analysis.js",
 +    "bin/merge-ui.js",
-+    "bin/context-tree.js"
++    "bin/context-tree.js",
++    "bin/context-lineage.js",
++    "bin/merge-updates.js"
    ],
    "repository": {
      "type": "git",
@@ -5618,10 +6119,10 @@ index 000000000..4edd8dfbb
 +        pass
 diff --git a/codex-cli/tests/merge-graph-integration.test.js b/codex-cli/tests/merge-graph-integration.test.js
 new file mode 100644
-index 000000000..ceb466503
+index 000000000..87b4cbd4d
 --- /dev/null
 +++ b/codex-cli/tests/merge-graph-integration.test.js
-@@ -0,0 +1,503 @@
+@@ -0,0 +1,512 @@
 +import assert from "node:assert/strict";
 +import { createServer } from "node:http";
 +import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -5941,7 +6442,8 @@ index 000000000..ceb466503
 +        items: [message("B继续保留一个例外。", "b-update")],
 +      });
 +      const incremental = await mergeThreads(client, {
-+        threadIds: [repeated.threadId, b.id],
++        threadIds: [repeated.threadId],
++        update: true,
 +      });
 +      assert.equal(incremental.importedItems, 1);
 +      assert.equal(provider.requests.length, priorRequests);
@@ -5961,6 +6463,14 @@ index 000000000..ceb466503
 +        { env },
 +      );
 +      assert.equal(JSON.parse(cli.stdout).importedItems, 0);
++      const noOp = await exec(
++        process.execPath,
++        [launcher, "merge", incremental.threadId, "--update", "--json"],
++        { env },
++      );
++      assert.equal(JSON.parse(noOp.stdout).noOp, true);
++      assert.equal(JSON.parse(noOp.stdout).threadId, incremental.threadId);
++      assert.equal(provider.requests.length, priorRequests);
 +      const beforeSynthesis = provider.requests.length;
 +      const synthesizedCli = await exec(
 +        process.execPath,
@@ -8041,10 +8551,10 @@ index 000000000..92e3b28f2
 +});
 diff --git a/codex-cli/tests/merge-tui-integration.test.js b/codex-cli/tests/merge-tui-integration.test.js
 new file mode 100644
-index 000000000..f207ed0e7
+index 000000000..72bf562b7
 --- /dev/null
 +++ b/codex-cli/tests/merge-tui-integration.test.js
-@@ -0,0 +1,504 @@
+@@ -0,0 +1,610 @@
 +import assert from "node:assert/strict";
 +import { createServer } from "node:http";
 +import { spawn, spawnSync } from "node:child_process";
@@ -8068,8 +8578,8 @@ index 000000000..f207ed0e7
 +  spawnSync("python3", ["--version"]).status === 0;
 +
 +test(
-+  "native /merge and /tree: default synthesis, branch switching, continuation and cancellation",
-+  { skip: !binary || !hasPty, timeout: 120000 },
++  "native /merge and /tree: default synthesis, branch switching, incremental updates and cancellation",
++  { skip: !binary || !hasPty, timeout: 180000 },
 +  async (t) => {
 +    const root = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
 +    const home = await mkdtemp(path.join(os.tmpdir(), "codex-tui-merge-"));
@@ -8509,6 +9019,112 @@ index 000000000..f207ed0e7
 +          source.id + " context",
 +        );
 +      }
++      await client.close();
++      terminal = startTerminal(mergedId);
++      await terminal.wait((screen) => screen.includes("graph-fixture"));
++      await delay(700);
++      const beforeNoOp = calls.length;
++      await terminal.command("/merge --update");
++      await terminal.wait((screen) =>
++        screen.includes("All merged sources are up to date."),
++      );
++      await verifyRollout(mergedId);
++      assert.equal(
++        calls.length,
++        beforeNoOp,
++        "unchanged updates do not call a model or switch chats",
++      );
++      await terminal.command("/tree " + b.id);
++      await delay(700);
++      await verifyRollout(b.id);
++      const beforeBranchWork = calls.length;
++      await terminal.command(
++        "B4: After the first merge, revise the ending and keep the sealed letter unread.",
++      );
++      await terminal.wait(() => calls.length > beforeBranchWork);
++      await delay(700);
++      await terminal.command("/tree " + mergedId);
++      await delay(700);
++      await verifyRollout(mergedId);
++      client = new AppServerClient(binary, { env });
++      await client.initialize();
++      const branchAfterWork = await loadSnapshot(client, b.id);
++      const pendingMark = terminal.screen().length;
++      const beforeUpdateCalls = calls.length;
++      await terminal.command("/tree");
++      await terminal.wait((screen) =>
++        screen.slice(pendingMark).includes("pending"),
++      );
++      assert.ok(
++        terminal.screen().slice(pendingMark).includes("/merge --update"),
++      );
++      terminal.input("\x1b");
++      await delay(200);
++      const previewMark = terminal.screen().length;
++      await terminal.command("/merge --update --dry-run");
++      await terminal.wait((screen) =>
++        screen.slice(previewMark).includes("Merge preview:"),
++      );
++      assert.equal(calls.length, beforeUpdateCalls);
++      await terminal.command("/merge --update");
++      await terminal.wait((screen) =>
++        screen.includes("Source updates merged. You can continue here."),
++      );
++      assert.equal(calls.length, beforeUpdateCalls + 1);
++      const updatedRolloutMark = terminal.screen().length;
++      await terminal.command("/rollout");
++      await terminal.wait((screen) =>
++        screen.slice(updatedRolloutMark).includes("rollout-"),
++      );
++      const updatedId = terminal
++        .screen()
++        .slice(updatedRolloutMark)
++        .match(/[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}/)?.[0];
++      assert.ok(
++        updatedId && updatedId !== mergedId && !ids.includes(updatedId),
++      );
++      await terminal.command(
++        "Continue the merged ending discussion after the branch update.",
++      );
++      await terminal.wait(() => calls.length > beforeUpdateCalls + 1);
++      await delay(700);
++      const updatedContinuation = JSON.stringify(
++        calls.find((body) =>
++          JSON.stringify(body.input).includes(
++            "Continue the merged ending discussion after the branch update.",
++          ),
++        ),
++      );
++      assert.ok(updatedContinuation.includes("B4: After the first merge"));
++      assert.ok(
++        updatedContinuation.includes(
++          "Continue comparing both prose candidates.",
++        ),
++      );
++      const unchangedMark = terminal.screen().length;
++      const beforeRepeatedUpdate = calls.length;
++      await terminal.command("/merge --update");
++      await terminal.wait((screen) =>
++        screen
++          .slice(unchangedMark)
++          .includes("All merged sources are up to date."),
++      );
++      await verifyRollout(updatedId);
++      assert.equal(calls.length, beforeRepeatedUpdate);
++      await terminal.save("tui-smoke-update");
++      await terminal.command("/quit");
++      await delay(1000);
++      await terminal.stop();
++      const branchAfterUpdate = await loadSnapshot(client, b.id);
++      assert.deepEqual(
++        branchAfterUpdate.records.map((record) => record.json),
++        branchAfterWork.records.map((record) => record.json),
++      );
++      report.cases.push({
++        name: "source continuation, pending tree hint, update preview, semantic update, retained mainline and no-op",
++        passed: true,
++        modelCallsForMerge: 1,
++      });
 +      const threads = await client.request("thread/list", {
 +        modelProviders: [],
 +        limit: 100,
@@ -8519,20 +9135,20 @@ index 000000000..f207ed0e7
 +        const snapshot = await loadSnapshot(client, thread.id);
 +        const capsule = snapshot.records
 +          .map((r) => parseGraphItem(JSON.parse(r.json)))
-+          .find(Boolean);
++          .findLast(Boolean);
 +        if (capsule) {
 +          const evidence = await readEvidence(capsule.evidence);
 +          assert.equal(
 +            evidence.graph.nodes.find(
 +              (n) => n.id === evidence.graph.mergeNodeId,
 +            ).parents.length,
-+            3,
++            thread.id === updatedId ? 2 : 3,
 +          );
 +          merged.push(thread.id);
 +        }
 +      }
-+      assert.equal(merged.length, 2);
-+      report.sourceContextsUnchanged = true;
++      assert.equal(merged.length, 3);
++      report.sourceContextsPreservedByMerge = true;
 +      report.savedMerges = merged;
 +      report.totalModelRequests = calls.length;
 +      await writeFile(
@@ -8653,17 +9269,18 @@ index 000000000..0959ff861
 +}
 diff --git a/codex-cli/tests/merge-ui.test.js b/codex-cli/tests/merge-ui.test.js
 new file mode 100644
-index 000000000..e6a0a39cd
+index 000000000..6ce59f0ce
 --- /dev/null
 +++ b/codex-cli/tests/merge-ui.test.js
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,352 @@
 +import assert from "node:assert/strict";
 +import { spawn } from "node:child_process";
 +import { createInterface } from "node:readline";
 +import { readFile } from "node:fs/promises";
 +import test from "node:test";
 +import { fileURLToPath } from "node:url";
-+import { exampleSources, fakeGraphClient } from "./fixtures/graph.js";
++import { exampleSources, fakeGraphClient, message } from "./fixtures/graph.js";
++import { mergeThreads } from "../bin/merge-context.js";
 +import { parseGraphItem } from "../bin/merge-graph.js";
 +import { JsonRpcClient } from "../bin/merge-rpc.js";
 +
@@ -8677,11 +9294,16 @@ index 000000000..e6a0a39cd
 +    disconnect = false,
 +    sources = exampleSources(),
 +    operation,
++    prepare,
 +  } = {},
 +) {
 +  const { client } = await fakeGraphClient(t, sources);
++  const primaryThreadId = (await prepare?.(client)) ?? "A";
++  client.calls.length = 0;
 +  const originals = await Promise.all(
-+    [...client.threads.values()].map((thread) => readFile(thread.path)),
++    sources.map((source) =>
++      readFile(client.threads.get(source.thread.id).path),
++    ),
 +  );
 +  const child = spawn(process.execPath, [helper], {
 +    env: client.env,
@@ -8770,7 +9392,7 @@ index 000000000..e6a0a39cd
 +  send({
 +    type: "start",
 +    operation,
-+    primaryThreadId: "A",
++    primaryThreadId,
 +    args,
 +    model: "fixture-reader",
 +  });
@@ -8855,6 +9477,50 @@ index 000000000..e6a0a39cd
 +    args: ["--goal", "Compare the views"],
 +  });
 +  assert.equal(client.calls.length, 0);
++});
++
++test("TUI --update discovers recorded sources and opens a fresh merge without a picker", async (t) => {
++  const { client, result, exitCode } = await runBridge(t, ["--update"], {
++    prepare: async (client) => {
++      const merged = await mergeThreads(client, {
++        threadIds: ["A", "B", "C"],
++        mode: "reference",
++      });
++      await client.request("thread/inject_items", {
++        threadId: "B",
++        items: [message("B later update", "b3")],
++      });
++      return merged.threadId;
++    },
++  });
++  assert.equal(exitCode, 0);
++  assert.equal(result.selectBranches, undefined);
++  assert.equal(result.importedItems, 1);
++  assert.equal(result.modelCalls, 1);
++  assert.equal(result.updates.pendingSources, 1);
++  assert.ok(client.calls.some((call) => call.method === "thread/fork"));
++});
++
++test("TUI --update with unchanged sources returns a no-op on the current chat", async (t) => {
++  let primary;
++  const { client, result, exitCode } = await runBridge(t, ["--update"], {
++    prepare: async (client) => {
++      const merged = await mergeThreads(client, {
++        threadIds: ["A", "B", "C"],
++        mode: "reference",
++      });
++      primary = merged.threadId;
++      return primary;
++    },
++  });
++  assert.equal(exitCode, 0);
++  assert.equal(result.noOp, true);
++  assert.equal(result.threadId, primary);
++  assert.ok(
++    client.calls.every((call) =>
++      ["thread/read", "thread/list"].includes(call.method),
++    ),
++  );
 +});
 +
 +test("TUI merge dry run performs no inference or thread creation", async (t) => {
@@ -8958,6 +9624,524 @@ index 000000000..e6a0a39cd
 +  client.receive(JSON.stringify({ id: sent[1].id, result: {} }));
 +  await assert.rejects(client.request("thread/fork", {}), /cancelled/);
 +  assert.equal(client.pending.size, 0);
++});
+diff --git a/codex-cli/tests/merge-updates.test.js b/codex-cli/tests/merge-updates.test.js
+new file mode 100644
+index 000000000..1d26eed8d
+--- /dev/null
++++ b/codex-cli/tests/merge-updates.test.js
+@@ -0,0 +1,512 @@
++import assert from "node:assert/strict";
++import { appendFile, readFile, readdir, rm, writeFile } from "node:fs/promises";
++import path from "node:path";
++import test from "node:test";
++import { contextTree } from "../bin/context-tree.js";
++import { mergeThreads } from "../bin/merge-context.js";
++import { parseMergeArgs } from "../bin/merge-cli.js";
++import {
++  expandSnapshot,
++  readEvidence,
++  saveEvidence,
++} from "../bin/merge-evidence.js";
++import { buildConversationGraph, GRAPH_PREFIX } from "../bin/merge-graph.js";
++import { loadSnapshot } from "../bin/merge-history.js";
++import { inspectMergeUpdates } from "../bin/merge-updates.js";
++import {
++  exampleSources,
++  fakeGraphClient,
++  message,
++  record,
++  source,
++} from "./fixtures/graph.js";
++
++const append = (client, id, ...items) =>
++  client.request("thread/inject_items", { threadId: id, items });
++const update = (client, id, options = {}) =>
++  mergeThreads(client, { threadIds: [id], update: true, ...options });
++const firstMerge = (client) =>
++  mergeThreads(client, { threadIds: ["A", "B", "C"], mode: "reference" });
++const writes = (calls) =>
++  calls.filter(
++    (call) =>
++      !["thread/read", "thread/list", "config/read"].includes(call.method),
++  );
++
++test("tree marks pending source items from both the source and merge, without model calls or writes", async (t) => {
++  const { client } = await fakeGraphClient(t);
++  const merged = await firstMerge(client);
++  await append(
++    client,
++    "B",
++    message("B的后续修正", "b3"),
++    message("B的新结论", "b4", "assistant"),
++  );
++  await append(client, "C", message("C的补充", "c4"));
++  client.calls.length = 0;
++  const fromB = await contextTree(client, "B");
++  const row = fromB.rows.find((row) => row.id === merged.threadId);
++  assert.match(row.name, /3 pending items/);
++  assert.match(row.description, /B \+2; C \+1/);
++  assert.equal(row.updates.pendingSources, 2);
++  const fromM = await contextTree(client, merged.threadId);
++  assert.match(fromM.rows.find((row) => row.id === "B").name, /\+2 pending/);
++  assert.match(fromM.updateHint, /\/merge --update/);
++  assert.deepEqual(writes(client.calls), []);
++});
++
++test("update imports only new evidence, keeps mainline work, and tracks unchanged sources across later updates", async (t) => {
++  const { client } = await fakeGraphClient(t);
++  const first = await firstMerge(client);
++  const originalGraph = (await readEvidence(first.evidence)).graph;
++  await append(
++    client,
++    first.threadId,
++    message("主线已经选定初稿，请保留", "m-work"),
++  );
++  await append(
++    client,
++    "B",
++    message("B的新事实", "b3"),
++    message("B撤回先前的建议", "b4", "assistant"),
++  );
++  const before = await Promise.all(
++    ["A", "B", "C", first.threadId].map((id) =>
++      readFile(client.threads.get(id).path),
++    ),
++  );
++  client.calls.length = 0;
++  const second = await update(client, first.threadId);
++  assert.equal(second.modelCalls, 1);
++  assert.equal(second.importedItems, 2);
++  assert.deepEqual(second.sourceThreadIds, [first.threadId, "B"]);
++  const archive = await readEvidence(second.evidence);
++  for (const node of originalGraph.nodes)
++    assert.deepEqual(
++      archive.graph.nodes.find((current) => current.id === node.id),
++      node,
++    );
++  assert.equal(
++    archive.records.filter((record) => JSON.parse(record.json).id === "b3")
++      .length,
++    1,
++  );
++  assert.ok(
++    archive.records.some((record) => JSON.parse(record.json).id === "m-work"),
++  );
++  const after = await Promise.all(
++    ["A", "B", "C", first.threadId].map((id) =>
++      readFile(client.threads.get(id).path),
++    ),
++  );
++  assert.deepEqual(after, before);
++  const native = await loadSnapshot(client, second.threadId);
++  const expanded = await expandSnapshot(native);
++  assert.ok(
++    expanded.records.some((record) => JSON.parse(record.json).id === "m-work"),
++  );
++  assert.equal(
++    (await inspectMergeUpdates(client, second.threadId)).sources.find(
++      (source) => source.id === "C",
++    ).state,
++    "upToDate",
++  );
++  const noOp = await update(client, second.threadId);
++  assert.equal(noOp.noOp, true);
++  await append(client, "C", message("C后来发现的事实", "c4"));
++  const third = await update(client, second.threadId, { mode: "reference" });
++  assert.equal(third.importedItems, 1);
++  assert.deepEqual(third.sourceThreadIds, [second.threadId, "C"]);
++  assert.equal(
++    (await inspectMergeUpdates(client, third.threadId)).sources.find(
++      (source) => source.id === "B",
++    ).state,
++    "upToDate",
++  );
++});
++
++test("unchanged sources, renamed chats and runtime settings are no-ops with no inference, archives or new chats", async (t) => {
++  const { client, directory } = await fakeGraphClient(t);
++  const merged = await firstMerge(client);
++  client.threads.get("B").name = "Renamed B";
++  await appendFile(
++    client.threads.get("B").path,
++    JSON.stringify({
++      type: "event_msg",
++      payload: { type: "token_count", info: null },
++    }) + "\n",
++  );
++  const files = await readdir(path.join(directory, "merges", "evidence"));
++  const size = client.threads.size;
++  client.calls.length = 0;
++  for (const dryRun of [false, true]) {
++    const result = await update(client, merged.threadId, { dryRun });
++    assert.equal(result.noOp, true);
++    assert.equal(result.threadId, merged.threadId);
++    assert.equal(result.modelCalls, 0);
++    assert.equal(result.dryRun, dryRun);
++  }
++  assert.equal(client.threads.size, size);
++  assert.deepEqual(
++    await readdir(path.join(directory, "merges", "evidence")),
++    files,
++  );
++  assert.deepEqual(writes(client.calls), []);
++});
++
++test("importing an older merged graph does not regress an incorporated source update boundary", async (t) => {
++  const { client } = await fakeGraphClient(t);
++  const first = await firstMerge(client);
++  await append(client, "B", message("Already incorporated update", "b3"));
++  const second = await update(client, first.threadId, { mode: "reference" });
++  const third = await mergeThreads(client, {
++    threadIds: [second.threadId, first.threadId],
++    mode: "reference",
++  });
++  client.calls.length = 0;
++  assert.equal(
++    (await inspectMergeUpdates(client, third.threadId)).sources.find(
++      (source) => source.id === "B",
++    ).state,
++    "upToDate",
++  );
++  assert.equal((await update(client, third.threadId)).noOp, true);
++  assert.deepEqual(writes(client.calls), []);
++});
++
++test("pending update previews never call a model, create a target or write evidence", async (t) => {
++  const { client, directory } = await fakeGraphClient(t);
++  const merged = await firstMerge(client);
++  await append(client, "B", message("新的细节", "b3"));
++  const evidence = await readdir(path.join(directory, "merges", "evidence"));
++  const lineage = await readdir(path.join(directory, "merges", "lineage"));
++  client.calls.length = 0;
++  const result = await update(client, merged.threadId, { dryRun: true });
++  assert.equal(result.dryRun, true);
++  assert.equal(result.importedItems, 1);
++  assert.equal(result.updates.pendingSources, 1);
++  assert.deepEqual(writes(client.calls), []);
++  assert.deepEqual(
++    await readdir(path.join(directory, "merges", "evidence")),
++    evidence,
++  );
++  assert.deepEqual(
++    await readdir(path.join(directory, "merges", "lineage")),
++    lineage,
++  );
++});
++
++test("same-length rewritten source history is not called up to date or automatically overwritten", async (t) => {
++  const { client } = await fakeGraphClient(t);
++  const merged = await firstMerge(client);
++  const file = client.threads.get("B").path;
++  const text = await readFile(file, "utf8");
++  await writeFile(file, text.replace("B偏向克制表达", "B已经改变观点"));
++  client.calls.length = 0;
++  const inspected = await inspectMergeUpdates(client, merged.threadId);
++  assert.equal(
++    inspected.sources.find((source) => source.id === "B").state,
++    "changed",
++  );
++  await assert.rejects(
++    update(client, merged.threadId),
++    /Source history was rolled back, replaced or compacted/,
++  );
++  assert.deepEqual(writes(client.calls), []);
++  const tree = await contextTree(client, merged.threadId);
++  assert.match(
++    tree.rows.find((row) => row.current).name,
++    /updates unavailable/,
++  );
++});
++
++test("unavailable, archived and busy sources block automatic updates without hiding the tree", async (t) => {
++  for (const state of ["deleted", "archived", "busy"])
++    await t.test(state, async (t) => {
++      const { client } = await fakeGraphClient(t);
++      const merged = await firstMerge(client);
++      if (state === "deleted") client.threads.delete("B");
++      if (state === "archived") client.threads.get("B").archived = true;
++      if (state === "busy") client.threads.get("B").status = { type: "active" };
++      client.calls.length = 0;
++      await assert.rejects(
++        update(client, merged.threadId),
++        /Cannot update all sources/,
++      );
++      const tree = await contextTree(client, merged.threadId);
++      assert.equal(tree.rows.length, 4);
++      assert.ok(tree.rows.find((row) => row.id === "B").disabledReason);
++      assert.equal(
++        tree.rows.find((row) => row.current).updates.unavailableSources,
++        1,
++      );
++      assert.deepEqual(writes(client.calls), []);
++    });
++});
++
++test("source compaction is a changed boundary requiring an explicit remerge", async (t) => {
++  const { client } = await fakeGraphClient(t);
++  const merged = await firstMerge(client);
++  await appendFile(
++    client.threads.get("B").path,
++    JSON.stringify({
++      type: "compacted",
++      payload: {
++        replacement_history: [message("B的摘要", "b-summary", "assistant")],
++      },
++    }) + "\n",
++  );
++  client.calls.length = 0;
++  await assert.rejects(update(client, merged.threadId), /compacted/);
++  assert.deepEqual(writes(client.calls), []);
++});
++
++test("a compacted target keeps frozen ancestry and imports only new branch nodes", async (t) => {
++  const { client } = await fakeGraphClient(t);
++  const merged = await firstMerge(client);
++  const original = await readEvidence(merged.evidence);
++  await appendFile(
++    client.threads.get(merged.threadId).path,
++    JSON.stringify({
++      type: "compacted",
++      payload: {
++        replacement_history: [
++          message("当前主线的压缩状态", "m-summary", "assistant"),
++        ],
++      },
++    }) + "\n",
++  );
++  await append(client, "B", message("B的后续事实", "b3"));
++  assert.equal(
++    (await inspectMergeUpdates(client, merged.threadId)).recovered,
++    true,
++  );
++  // The fixture's basic fork copies response lines. Native fork replays the
++  // retained checkpoint instead; emulate that boundary for this regression.
++  client.onFork = async (fork, params) => {
++    if (params.threadId !== merged.threadId) return;
++    const snapshot = await loadSnapshot(client, params.threadId);
++    await writeFile(
++      fork.path,
++      JSON.stringify({ type: "session_meta", payload: { id: fork.id } }) +
++        "\n" +
++        snapshot.records
++          .map(
++            (record) =>
++              '{"type":"response_item","payload":' + record.json + "}",
++          )
++          .join("\n") +
++        "\n",
++    );
++  };
++  const updated = await update(client, merged.threadId, { mode: "reference" });
++  assert.equal(updated.importedItems, 1);
++  const archive = await readEvidence(updated.evidence);
++  for (const node of original.graph.nodes)
++    assert.deepEqual(
++      archive.graph.nodes.find((current) => current.id === node.id),
++      node,
++    );
++  assert.ok(
++    archive.records.some(
++      (record) => JSON.parse(record.json).id === "m-summary",
++    ),
++  );
++  assert.equal((await update(client, updated.threadId)).noOp, true);
++});
++
++test("rollback of a merge followed by compaction cannot resurrect the removed merge", async (t) => {
++  const { client } = await fakeGraphClient(t);
++  const merged = await firstMerge(client);
++  await appendFile(
++    client.threads.get(merged.threadId).path,
++    [
++      JSON.stringify({
++        type: "event_msg",
++        payload: { type: "thread_rolled_back", num_turns: 1 },
++      }),
++      JSON.stringify({
++        type: "compacted",
++        payload: {
++          replacement_history: [
++            message("回退后保留的历史", "rolled-back-summary", "assistant"),
++          ],
++        },
++      }),
++    ].join("\n") + "\n",
++  );
++  client.calls.length = 0;
++  await assert.rejects(
++    update(client, merged.threadId),
++    /no longer in this chat's retained history/,
++  );
++  assert.deepEqual(writes(client.calls), []);
++});
++
++test("older graph merges can recover ordinary source update boundaries from immutable evidence", async (t) => {
++  const snapshots = exampleSources();
++  const { client, directory } = await fakeGraphClient(t, snapshots);
++  const built = buildConversationGraph(snapshots);
++  const evidence = await saveEvidence(
++    built.archive,
++    path.join(directory, "merges", "evidence"),
++  );
++  const { thread } = await client.request("thread/fork", { threadId: "A" });
++  await append(
++    client,
++    thread.id,
++    message(
++      GRAPH_PREFIX +
++        JSON.stringify({
++          format: "codex-graph-merge-v1",
++          mergeNodeId: built.graph.mergeNodeId,
++          evidence,
++          branches: built.imports.map((branch) => ({
++            threadId: branch.threadId,
++            primary: false,
++          })),
++        }),
++    ),
++  );
++  await append(client, "B", message("旧会话的新内容", "b3"));
++  const inspected = await inspectMergeUpdates(client, thread.id);
++  assert.equal(
++    inspected.sources.find((source) => source.id === "B").newItems,
++    1,
++  );
++  await appendFile(
++    client.threads.get(thread.id).path,
++    JSON.stringify({
++      type: "compacted",
++      payload: {
++        replacement_history: [
++          message("旧合并会话的当前摘要", "old-summary", "assistant"),
++        ],
++      },
++    }) + "\n",
++  );
++  assert.equal((await inspectMergeUpdates(client, thread.id)).recovered, true);
++  client.onFork = async (fork, params) => {
++    const snapshot = await loadSnapshot(client, params.threadId);
++    await writeFile(
++      fork.path,
++      JSON.stringify({ type: "session_meta", payload: { id: fork.id } }) +
++        "\n" +
++        snapshot.records
++          .map(
++            (record) =>
++              '{"type":"response_item","payload":' + record.json + "}",
++          )
++          .join("\n") +
++        "\n",
++    );
++  };
++  const updated = await update(client, thread.id, { mode: "reference" });
++  assert.equal(updated.importedItems, 1);
++  assert.equal((await update(client, updated.threadId)).noOp, true);
++});
++
++test("a source that grows during semantic update analysis is rejected before target creation", async (t) => {
++  const { client } = await fakeGraphClient(t);
++  const merged = await firstMerge(client);
++  await append(client, "B", message("B的新输入", "b3"));
++  const runTurn = client.runTurn;
++  client.runTurn = async (params) => {
++    const result = await runTurn(params);
++    await append(client, "B", message("分析期间又有新输入", "b4"));
++    return result;
++  };
++  client.calls.length = 0;
++  await assert.rejects(
++    update(client, merged.threadId),
++    /Source changed during update analysis/,
++  );
++  assert.ok(
++    !client.calls.some(
++      (call) =>
++        call.method === "thread/fork" ||
++        (call.method === "thread/start" && !call.params.ephemeral),
++    ),
++  );
++});
++
++test("missing evidence fails update checks without presenting a false no-op", async (t) => {
++  const { client } = await fakeGraphClient(t);
++  const merged = await firstMerge(client);
++  await rm(merged.evidence.path);
++  client.calls.length = 0;
++  await assert.rejects(update(client, merged.threadId));
++  const tree = await contextTree(client, merged.threadId);
++  assert.match(
++    tree.rows.find((row) => row.current).name,
++    /updates unavailable/,
++  );
++  assert.deepEqual(writes(client.calls), []);
++});
++
++test("compacted recovery rejects a lineage index pointing at another valid merge archive", async (t) => {
++  const { client, directory } = await fakeGraphClient(t);
++  const merged = await firstMerge(client);
++  const other = await mergeThreads(client, {
++    threadIds: ["A", "B"],
++    mode: "reference",
++  });
++  await appendFile(
++    client.threads.get(merged.threadId).path,
++    JSON.stringify({
++      type: "compacted",
++      payload: { replacement_history: [message("当前摘要", "summary")] },
++    }) + "\n",
++  );
++  const file = path.join(
++    directory,
++    "merges",
++    "lineage",
++    merged.threadId + ".json",
++  );
++  const lineage = JSON.parse(await readFile(file, "utf8"));
++  lineage.evidence = other.evidence;
++  await writeFile(file, JSON.stringify(lineage) + "\n");
++  client.calls.length = 0;
++  await assert.rejects(
++    update(client, merged.threadId),
++    /does not match its saved lineage/,
++  );
++  assert.deepEqual(writes(client.calls), []);
++});
++
++test("an oversized update batch is rejected before inference or creation", async (t) => {
++  const sources = Array.from({ length: 32 }, (_, i) =>
++    source("source-" + i, [
++      record(message("Original " + i, "item-" + i), "source-" + i),
++    ]),
++  );
++  const { client } = await fakeGraphClient(t, sources);
++  const merged = await mergeThreads(client, {
++    threadIds: sources.map((source) => source.thread.id),
++    mode: "reference",
++  });
++  for (let i = 0; i < sources.length; i++)
++    await append(
++      client,
++      sources[i].thread.id,
++      message("Update " + i, "update-" + i),
++    );
++  client.calls.length = 0;
++  await assert.rejects(update(client, merged.threadId), /More than 31 sources/);
++  assert.deepEqual(writes(client.calls), []);
++});
++
++test("update syntax accepts one merged chat and rejects explicit sources, legacy mode and ordinary chats", async (t) => {
++  assert.equal(parseMergeArgs(["M", "--update"]).update, true);
++  assert.equal(parseMergeArgs(["M", "--update", "--dry-run"]).dryRun, true);
++  for (const args of [
++    ["--update"],
++    ["M", "B", "--update"],
++    ["M", "--update", "--mode", "legacy"],
++  ])
++    assert.throws(() => parseMergeArgs(args));
++  const { client } = await fakeGraphClient(t);
++  await assert.rejects(update(client, "A"), /previously merged chat/);
++  assert.deepEqual(writes(client.calls), []);
 +});
 diff --git a/codex-cli/tests/merge.test.js b/codex-cli/tests/merge.test.js
 new file mode 100644
@@ -9571,10 +10755,10 @@ index 9d7d85cd0..302b27258 100644
  mod empty_state_policy;
 diff --git a/codex-rs/tui/src/app/conversation_merge.rs b/codex-rs/tui/src/app/conversation_merge.rs
 new file mode 100644
-index 000000000..431a426cc
+index 000000000..60c9caa05
 --- /dev/null
 +++ b/codex-rs/tui/src/app/conversation_merge.rs
-@@ -0,0 +1,653 @@
+@@ -0,0 +1,668 @@
 +//! Conversation graph merge and branch navigation for the interactive CLI.
 +//!
 +//! The Node helper shares the existing graph engine with `codex merge`. Its JSON-RPC requests
@@ -9627,9 +10811,11 @@ index 000000000..431a426cc
 +}
 +
 +#[derive(Deserialize)]
++#[serde(rename_all = "camelCase")]
 +struct ContextTreeResult {
 +    rows: Vec<ContextTreeRow>,
 +    warnings: Vec<String>,
++    update_hint: Option<String>,
 +}
 +
 +struct MergeThread {
@@ -9881,6 +11067,14 @@ index 000000000..431a426cc
 +                            .chat_widget
 +                            .add_error_message(format!("Could not list merge branches: {error:#}")),
 +                    }
++                } else if result["noOp"].as_bool() == Some(true) {
++                    self.chat_widget.add_info_message(
++                        result["message"]
++                            .as_str()
++                            .unwrap_or("All merged sources are up to date.")
++                            .into(),
++                        None,
++                    );
 +                } else if result["dryRun"].as_bool() == Some(true) {
 +                    self.chat_widget.add_info_message(
 +                        format!("Merge preview:\n{}", serde_json::to_string_pretty(&result)?),
@@ -9897,10 +11091,12 @@ index 000000000..431a426cc
 +                        let target_id = target.thread_id;
 +                        let control = self.resume_target_session(tui, app_server, target).await?;
 +                        if self.chat_widget.thread_id() == Some(target_id) {
-+                            self.chat_widget.add_info_message(
-+                                "Branches merged. You can continue here.".into(),
-+                                None,
-+                            );
++                            let message = if result.get("updates").is_some() {
++                                "Source updates merged. You can continue here."
++                            } else {
++                                "Branches merged. You can continue here."
++                            };
++                            self.chat_widget.add_info_message(message.into(), None);
 +                        } else {
 +                            self.chat_widget.add_info_message(
 +                                format!("Merge saved as {thread_id}. Use /resume {thread_id} to open it."), None,
@@ -9965,6 +11161,9 @@ index 000000000..431a426cc
 +                if !result.warnings.is_empty() {
 +                    self.chat_widget
 +                        .add_info_message(result.warnings.join("\n"), None);
++                }
++                if let Some(hint) = result.update_hint {
++                    self.chat_widget.add_info_message(hint, None);
 +                }
 +                if let Some(target) = target {
 +                    match result.rows.iter().find(|row| row.id == target) {
@@ -10764,10 +11963,10 @@ index d9ba053eb..a694065d7 100644
          assert_eq!(SlashCommand::Stop.command(), "stop");
 diff --git a/docs/context_merge.md b/docs/context_merge.md
 new file mode 100644
-index 000000000..9319e0eab
+index 000000000..6240c11b4
 --- /dev/null
 +++ b/docs/context_merge.md
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,377 @@
 +# Conversation graph merge
 +
 +`codex merge A_ID B_ID C_ID` combines conversation context into a new resumable
@@ -10854,6 +12053,43 @@ index 000000000..9319e0eab
 +Deleted sources and archived or busy chats stay visible as disabled rows;
 +unavailable older evidence is reported instead of inventing relationships.
 +This initial navigator supports local saved chats and requires an idle main chat.
++
++## Updating merged sources
++
++Merge parents are frozen snapshots. Continuing B after creating M does not
++change M's earlier history. `/tree` compares source snapshots and marks pending
++items on merge rows; in M, source rows also show their unmerged item counts.
++Counts cover persisted conversation items, including messages and tool records.
++Browsing and checking updates do not call a model or write history.
++
++From M, run `/merge --update --dry-run` to preview, then `/merge --update` to
++merge updates from all recorded sources. The current conversation is the primary,
++so its subsequent dialogue is preserved. Success opens a new merged chat; original
++nodes and parent links remain immutable. Sources without new items stay recorded
++for future updates, including through nested merges. With no pending updates,
++the command stays in the current chat without inference, evidence writes or a new
++thread. The external interface is `codex merge M_ID --update [--resume]`.
++
++Each graph archive records exact native source-prefix counts and SHA-256 digests;
++names, modification times, settings events and token usage do not define progress.
++Older graph archives can recover ordinary source boundaries from original paths.
++Older merged sources without a native boundary need an explicit remerge once.
++`--update` accepts only the current/base ID, without explicit source IDs or legacy
++mode. More than 31 pending sources require explicit merges in batches.
++
++Unavailable or archived sources fail an update rather than produce a false
++up-to-date result. Rollback, replacement and source compaction change the prefix
++boundary and require an explicit `/merge SOURCE_ID`. Update preflight rechecks
++selected source snapshots after analysis and rejects races before target creation.
++All-source discovery is a collection of snapshots, not a writer transaction.
++
++For a compacted primary, a matching graph frame retained in the native
++pre-compaction history can restore frozen ancestry. Existing lineage references
++must agree with that frame. The retained
++compacted dialogue remains the primary input; only newly introduced source nodes
++are added. Evidence references and graph identities must match. A rolled-back
++merge cannot be recovered by this path. Local rollouts and archives must remain
++readable; this does not reconstruct history deleted from storage.
 +
 +## The stored graph and the model's context
 +
@@ -11110,10 +12346,10 @@ index 000000000..9319e0eab
 +content, semantic reading, cancellation, and unchanged source context.
 diff --git a/docs/context_merge_checkout.md b/docs/context_merge_checkout.md
 new file mode 100644
-index 000000000..df720f74f
+index 000000000..dc3e25cdc
 --- /dev/null
 +++ b/docs/context_merge_checkout.md
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,213 @@
 +# 在此分支使用上下文图 merge
 +
 +当前功能在 `huanyuqu/codex` 的 `context-graph` 分支。`origin` 指向你的 fork，
@@ -11215,6 +12451,44 @@ index 000000000..df720f74f
 +索引保存在 `~/.codex/merges/lineage/`，遵循 `CODEX_HOME`。旧的 graph merge
 +会从保存的上下文与校验过的存档中恢复关系。已删除、归档或忙碌的分支会
 +显示为不可选。当前版本支持本地已保存的会话，切换时主会话需要空闲。
++
++## 合并来源的后续更新
++
++合并记录固定的来源快照。回到 B 继续工作后，原来的 M 仍然保留当时的上下文。
++打开 `/tree` 会检查来源进展，标出尚未合入的项目，例如：
++
++```text
++A
++├─ B [+2 pending]
++├─ C
++└─ M（当前）[2 pending items]    merge ← A + B + C · updates: B +2
++```
++
++这里的项目数包含保存的消息及工具调用/结果。在 M 中输入：
++
++```text
++/merge --update --dry-run
++/merge --update
++```
++
++第一条预览增量，不调用模型、不写存档、不创建会话。第二条查找已记录来源的
++新增内容，以当前 M 为主线进行默认语义合并，创建并打开新会话 M2。M 后续
++的讨论和之前合入的 C 都保留；以后 C 再增长，也能从 M2 继续更新。
++没有新增内容时，会提示来源已同步，停留在当前会话，不调用模型或创建副本。
++
++外部 CLI 也支持：
++
++```sh
++./codex merge M_ID --update --dry-run
++./codex merge M_ID --update --resume
++```
++
++`--update` 自动查找来源，不与额外来源 UUID 混用。来源历史发生回退、替换或
++compact 时，树中会说明边界已改变，需要用 `/merge B_ID` 显式重新合并；
++来源忙碌、已归档、被删除或存档不可读时，会说明原因并停止更新。
++来源改名、普通会话切换和 token 统计不会被当作新增内容。
++当前主线 compact 后，若原始日志仍能验证合并边界，更新会保留
++旧图作为来源关系，以当前压缩后的主线内容继续合并。回退掉的合并不能被恢复。
 +
 +## 运行与开发
 +

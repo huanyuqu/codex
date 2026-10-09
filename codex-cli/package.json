@@ -22,7 +22,9 @@
     "bin/merge-views.js",
     "bin/merge-analysis.js",
     "bin/merge-ui.js",
-    "bin/context-tree.js"
+    "bin/context-tree.js",
+    "bin/context-lineage.js",
+    "bin/merge-updates.js"
   ],
   "repository": {
     "type": "git",

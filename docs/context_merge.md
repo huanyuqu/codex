@@ -85,6 +85,43 @@ Deleted sources and archived or busy chats stay visible as disabled rows;
 unavailable older evidence is reported instead of inventing relationships.
 This initial navigator supports local saved chats and requires an idle main chat.
 
+## Updating merged sources
+
+Merge parents are frozen snapshots. Continuing B after creating M does not
+change M's earlier history. `/tree` compares source snapshots and marks pending
+items on merge rows; in M, source rows also show their unmerged item counts.
+Counts cover persisted conversation items, including messages and tool records.
+Browsing and checking updates do not call a model or write history.
+
+From M, run `/merge --update --dry-run` to preview, then `/merge --update` to
+merge updates from all recorded sources. The current conversation is the primary,
+so its subsequent dialogue is preserved. Success opens a new merged chat; original
+nodes and parent links remain immutable. Sources without new items stay recorded
+for future updates, including through nested merges. With no pending updates,
+the command stays in the current chat without inference, evidence writes or a new
+thread. The external interface is `codex merge M_ID --update [--resume]`.
+
+Each graph archive records exact native source-prefix counts and SHA-256 digests;
+names, modification times, settings events and token usage do not define progress.
+Older graph archives can recover ordinary source boundaries from original paths.
+Older merged sources without a native boundary need an explicit remerge once.
+`--update` accepts only the current/base ID, without explicit source IDs or legacy
+mode. More than 31 pending sources require explicit merges in batches.
+
+Unavailable or archived sources fail an update rather than produce a false
+up-to-date result. Rollback, replacement and source compaction change the prefix
+boundary and require an explicit `/merge SOURCE_ID`. Update preflight rechecks
+selected source snapshots after analysis and rejects races before target creation.
+All-source discovery is a collection of snapshots, not a writer transaction.
+
+For a compacted primary, a matching graph frame retained in the native
+pre-compaction history can restore frozen ancestry. Existing lineage references
+must agree with that frame. The retained
+compacted dialogue remains the primary input; only newly introduced source nodes
+are added. Evidence references and graph identities must match. A rolled-back
+merge cannot be recovered by this path. Local rollouts and archives must remain
+readable; this does not reconstruct history deleted from storage.
+
 ## The stored graph and the model's context
 
 Consider a primary `A1 → A2 → A3`, a branch `A1 → B2`, and a branch

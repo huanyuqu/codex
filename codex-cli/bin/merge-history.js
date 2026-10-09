@@ -5,8 +5,18 @@ import * as zlib from "node:zlib";
 import { promisify } from "node:util";
 
 export const MERGE_PREFIX = "Codex context merge (historical branch data):\n";
+export const GRAPH_PREFIX =
+  "Codex conversation graph merge (quoted branch history):\n";
 const MAX_ROLLOUT_BYTES = 64 * 1024 * 1024;
 export const hash = (value) => createHash("sha256").update(value).digest("hex");
+
+// Runtime settings and token-count events do not advance a conversation. Keep
+// the exact retained ResponseItem prefix so rollback and compaction are not
+// mistaken for newly appended dialogue.
+export const snapshotVersion = (records) => ({
+  recordCount: records.length,
+  sha256: hash(JSON.stringify(records.map((record) => record.json))),
+});
 export const recordRef = (record) =>
   "r_" + hash(record.key + "\n" + record.json).slice(0, 24);
 
@@ -275,6 +285,7 @@ export async function loadSnapshot(
   let records = [];
   let inProgress = false;
   let hasCompaction = false;
+  const compactedGraphRecords = new Map();
   let currentTurnId = null;
   let tokenUsage = null;
   const base = meta.payload.history_base;
@@ -294,6 +305,8 @@ export async function loadSnapshot(
     inProgress = parent.inProgress;
     currentTurnId = parent.currentTurnId;
     hasCompaction = parent.hasCompaction;
+    for (const record of parent.compactedGraphRecords ?? [])
+      compactedGraphRecords.set(record.fingerprint, record);
     tokenUsage = parent.tokenUsage;
   }
   const append = (item, raw, ordinal) => {
@@ -389,6 +402,18 @@ export async function loadSnapshot(
       append({ type: line.type }, raw, line.ordinal ?? index);
     else if (line.type === "compacted") {
       tokenUsage = null;
+      for (const record of records) {
+        const item = JSON.parse(record.json);
+        if (
+          item.type === "message" &&
+          item.role === "user" &&
+          item.content?.[0]?.text?.startsWith(GRAPH_PREFIX)
+        )
+          compactedGraphRecords.set(record.fingerprint, {
+            fingerprint: record.fingerprint,
+            json: record.json,
+          });
+      }
       // Import the compacted context rather than resurrecting discarded items.
       hasCompaction = true;
       const replacement = payload.replacement_history;
@@ -444,6 +469,7 @@ export async function loadSnapshot(
     inProgress,
     currentTurnId,
     hasCompaction,
+    compactedGraphRecords: [...compactedGraphRecords.values()],
     tokenUsage,
   };
 }

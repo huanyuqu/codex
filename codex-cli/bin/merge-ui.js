@@ -43,7 +43,7 @@ async function run(message) {
       emit({
         type: "result",
         result: {
-          help: "Usage: /merge [BRANCH_ID...] [--mode auto|inline|summary|reference] [--goal TEXT] [--dry-run]\nThe current chat is the primary. Without branch IDs, /merge opens a multi-select picker. Codex synthesizes the branches by default; reference mode does not call a model. Successful merges open the new chat. Use /tree to browse related chats.",
+          help: "Usage: /merge [BRANCH_ID...] [--mode auto|inline|summary|reference] [--goal TEXT] [--dry-run]\n       /merge --update [--dry-run]\nThe current chat is the primary. Without branch IDs, /merge opens a multi-select picker. --update merges new context from recorded sources; unchanged sources create no new chat or model call. Codex synthesizes the branches by default; reference mode does not call a model. Successful merges open the new chat. Use /tree to browse related chats and pending updates.",
         },
       });
       return;
@@ -52,7 +52,7 @@ async function run(message) {
       throw new Error(
         "/merge uses the current CLI connection; omit --config, --cd, --resume and --json",
       );
-    if (options.threadIds.length === 1) {
+    if (options.threadIds.length === 1 && !options.update) {
       emit({
         type: "result",
         result: { selectBranches: true, args: message.args },
@@ -62,7 +62,9 @@ async function run(message) {
     options.model ??= message.model;
     emit({
       type: "progress",
-      text: "Merging conversation context; long branches may need summaries. Esc cancels.",
+      text: options.update
+        ? "Checking recorded sources and merging pending updates. Esc cancels."
+        : "Merging conversation context; long branches may need summaries. Esc cancels.",
     });
     const result = await mergeThreads(client, options);
     emit({ type: "result", result });

@@ -17,7 +17,7 @@ CODEX_TUI_MERGE_TEST_BINARY="$PWD/codex-rs/target/debug/codex" \
   node --test --test-reporter=spec codex-cli/tests/*.test.js
 ```
 
-108 tests passed with no failures or skips in the final regression run.
+129 tests passed with no failures or skips in the final regression run.
 
 The final suite covers the earlier deterministic/task-state merge and the new
 conversation graph compiler. Native integration tests use disposable isolated
@@ -48,6 +48,17 @@ Graph checks cover:
 - Recovery of omitted native fork metadata from plain, reference-backed and zstd
   rollout headers; older graph merges and inherited capsules; deleted sources,
   archived branches, missing evidence, invalid lineage, and repeated cursors.
+- Pending-source badges and `/merge --update`: exact source-prefix checks,
+  preservation of subsequent mainline dialogue, unchanged-source tracking across
+  repeated/nested updates, and preventing older imported graphs from regressing
+  incorporated source boundaries. No-op updates and previews perform no inference,
+  create no target and write no archives.
+- Renames and settings events do not advance a source. Rewritten, rolled-back,
+  compacted, deleted, archived or busy sources do not produce a false up-to-date
+  result. Source changes during update analysis fail before target creation.
+- Recovery of ordinary boundaries from older graph evidence, frozen ancestry
+  after verified primary compaction, rejection of rolled-back merge recovery and
+  mismatched lineage/evidence, and oversized update-batch rejection.
 
 Four native graph tests exercise both legacy and paginated storage. Two create
 staggered forks, compress a long branch, inline another branch's image, restart and
@@ -126,11 +137,13 @@ including command availability, quoted arguments, unavailable/busy sessions,
 multiple branch selection, tree search/current selection and picker cancellation. This is targeted TUI coverage,
 not the full Rust workspace suite.
 
-Nine JavaScript tests exercise the JSONL bridge using a shared app-server
+Eleven JavaScript tests exercise the JSONL bridge using a shared app-server
 transport, early streaming notifications, default short synthesis and no-inference previews,
 option-only picker requests, invalid arguments, cancellation before a turn reply,
-host disconnects, and read-only tree discovery. Nine additional tree tests cover
-the session relationships and compatibility paths described above.
+host disconnects, read-only tree discovery, and update/no-op routing without a
+picker. Nine additional tree tests cover the session relationships and
+compatibility paths described above. Nineteen update regression cases, including
+three unavailable-source subcases, cover the incremental update behavior.
 
 The additional native terminal test uses a real Unix PTY, disposable Codex home,
 and controlled Responses provider. It verifies bare `/merge` selecting B and C,
@@ -142,6 +155,16 @@ remains A. Both successful targets retain three merge parents; source conversati
 records remain unchanged. It opens `/tree` before merging, searches B's UUID in
 the tree picker after merging, switches B to C with `/tree C_ID`, then returns
 to the saved merge using `/tree M_ID`; rollout identities verify every switch.
+An additional terminal run continues B after its first merge, returns to M and
+checks the pending-source tree indicator. It verifies an update preview without
+inference, one default semantic update call, automatic switching to the new chat,
+and a continuation request containing both B's new input and M's earlier dialogue.
+Unchanged updates before and after that run make no model calls and keep the same
+rollout identity. B changes only through the explicit continuation; updating its
+merge preserves B's resulting conversation records. Native graph regressions in
+both legacy and paginated storage also use automatic source discovery and check
+the external CLI's no-op update response after restart.
+
 Tree discovery and switching make no model calls. Ordinary native resume appends thread-settings events
 to source logs, so this TUI check compares source context records rather than asserting
 that the entire runtime log is byte-identical.
@@ -154,7 +177,7 @@ the command/picker and bridge unit tests cover the platform-neutral code.
 
 ## Packaging and source checks
 
-All twelve runtime JavaScript files (the launcher and eleven graph modules) are listed
+All fourteen runtime JavaScript files (the launcher and thirteen graph modules) are listed
 in `codex-cli/package.json`. Targeted formatting, syntax checks, `npm pack
 --dry-run`, and `git diff --check` validate the changed files and package contents.
 The source patch is checked against the pinned Git baseline in an isolated
