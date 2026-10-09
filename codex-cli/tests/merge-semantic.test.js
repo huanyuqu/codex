@@ -16,7 +16,7 @@ import {
   planMerge,
 } from "../bin/merge-context.js";
 const mergeThreads = (client, options) =>
-  mergeThreadsImpl(client, { mode: "legacy", ...options });
+  mergeThreadsImpl(client, { mode: "legacy", semantic: false, ...options });
 import { parseMergeArgs } from "../bin/merge-cli.js";
 import { hash } from "../bin/merge-history.js";
 import {
@@ -274,11 +274,10 @@ test("malformed semantic provenance fails instead of silently losing its origina
   assert.equal(parseSemanticItem(message("ordinary message", "normal")), null);
 });
 
-test("semantic CLI options are explicit and bounded", () => {
+test("semantic CLI defaults and analysis limits", () => {
   const options = parseMergeArgs([
     "a",
     "b",
-    "--semantic",
     "--goal",
     "preserve API",
     "--model",
@@ -288,23 +287,22 @@ test("semantic CLI options are explicit and bounded", () => {
   ]);
   assert.equal(options.analysisTimeoutMs, 60000);
   assert.equal(options.summaryBytes, 16384);
-  assert.throws(
-    () => parseMergeArgs(["a", "b", "--goal", "goal"]),
-    /require --semantic/,
+  assert.equal(options.semantic, true);
+  assert.equal(parseMergeArgs(["a", "b", "--goal", "goal"]).goal, "goal");
+  assert.equal(
+    parseMergeArgs(["a", "b", "--mode", "reference"]).semantic,
+    false,
   );
   assert.throws(
-    () => parseMergeArgs(["a", "b", "--semantic", "--summary-bytes", "0"]),
+    () => parseMergeArgs(["a", "b", "--semantic"]),
+    /Unknown merge option/,
+  );
+  assert.throws(
+    () => parseMergeArgs(["a", "b", "--summary-bytes", "0"]),
     /positive/,
   );
   assert.throws(
-    () =>
-      parseMergeArgs([
-        "a",
-        "b",
-        "--semantic",
-        "--timeout-seconds",
-        "999999999",
-      ]),
+    () => parseMergeArgs(["a", "b", "--timeout-seconds", "999999999"]),
     /too large/,
   );
 });

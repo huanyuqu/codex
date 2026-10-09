@@ -13,6 +13,7 @@ import {
 import { semanticPlan } from "./merge-semantic.js";
 import { parseGraphItem } from "./merge-graph.js";
 import { graphMergePlan } from "./merge-views.js";
+import { saveMergeLineage } from "./context-tree.js";
 
 export const DEFAULT_MAX_BYTES = 512 * 1024;
 
@@ -145,14 +146,10 @@ export function planMerge(snapshots, { maxBytes = DEFAULT_MAX_BYTES } = {}) {
 
 /** Merge into a fresh, durable native fork. All source threads remain readable. */
 export async function mergeThreads(client, options = {}) {
-  const {
-    threadIds,
-    maxBytes,
-    name,
-    dryRun = false,
-    cwd,
-    semantic = false,
-  } = options;
+  const { threadIds, maxBytes, name, dryRun = false, cwd } = options;
+  const mode = options.mode ?? "auto";
+  const semantic = options.semantic ?? mode !== "reference";
+  options = { ...options, mode, semantic };
   if (
     !Array.isArray(threadIds) ||
     threadIds.length < 2 ||
@@ -179,14 +176,13 @@ export async function mergeThreads(client, options = {}) {
   }
   if (options.analysisTimeoutMs > 2147483647)
     throw new Error("Analysis timeout is too large");
-  const mode = options.mode ?? "auto";
   if (!["auto", "inline", "summary", "reference", "legacy"].includes(mode))
     throw new Error("Unknown merge mode");
   if (!semantic && options.goal !== undefined)
-    throw new Error("Semantic options require --semantic");
+    throw new Error("A merge goal requires semantic synthesis");
   if (semantic && mode === "reference")
     throw new Error(
-      "--semantic requires a mode that supplies conversation content",
+      "Semantic synthesis requires a mode that supplies conversation content",
     );
   if (
     mode === "legacy" &&
@@ -199,7 +195,9 @@ export async function mergeThreads(client, options = {}) {
       "evidenceDir",
     ].some((key) => options[key] !== undefined)
   )
-    throw new Error("Semantic options require --semantic in legacy mode");
+    throw new Error(
+      "Analysis options require semantic synthesis in legacy mode",
+    );
   for (const field of ["goal", "model", "evidenceDir"]) {
     if (
       options[field] !== undefined &&
@@ -327,6 +325,12 @@ export async function mergeThreads(client, options = {}) {
       )
         throw new Error("A merge context item was not persisted");
     }
+    await saveMergeLineage(
+      client.env,
+      target.id,
+      nativeSnapshots,
+      plan.summary,
+    );
     await client.request("thread/unsubscribe", { threadId: target.id });
     return { dryRun: false, threadId: target.id, ...plan.summary };
   } catch (error) {

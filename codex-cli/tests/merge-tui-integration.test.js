@@ -21,7 +21,7 @@ const hasPty =
   spawnSync("python3", ["--version"]).status === 0;
 
 test(
-  "native /merge: picker, shared ownership, continuation, semantic reading and cancellation",
+  "native /merge and /tree: default synthesis, branch switching, continuation and cancellation",
   { skip: !binary || !hasPty, timeout: 120000 },
   async (t) => {
     const root = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
@@ -277,6 +277,20 @@ trust_level = "trusted"
       terminal = startTerminal(a.id);
       await terminal.wait((screen) => screen.includes("graph-fixture"));
       await delay(700);
+      const beforeTree = terminal.screen().length;
+      const beforeTreeCalls = calls.length;
+      await terminal.command("/tree");
+      await terminal.wait((screen) => {
+        const tree = screen.slice(beforeTree);
+        return (
+          tree.includes("Conversation tree") &&
+          tree.includes("Branch B") &&
+          tree.includes("Branch C")
+        );
+      });
+      terminal.input("\x1b");
+      await delay(200);
+      assert.equal(calls.length, beforeTreeCalls, "tree does not call a model");
       await terminal.command("/merge --help");
       await terminal.wait((screen) => screen.includes("Usage: /merge"));
       await terminal.command("/merge " + b.id + " " + c.id + " --dry-run");
@@ -297,9 +311,19 @@ trust_level = "trusted"
       );
       assert.equal(
         calls.length,
-        beforePickerCalls,
-        "short merge makes no inference calls",
+        beforePickerCalls + 1,
+        "short merge synthesizes the branches by default",
       );
+      const rolloutMark = terminal.screen().length;
+      await terminal.command("/rollout");
+      await terminal.wait((screen) =>
+        screen.slice(rolloutMark).includes("rollout-"),
+      );
+      const mergedId = terminal
+        .screen()
+        .slice(rolloutMark)
+        .match(/[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}/)?.[0];
+      assert.ok(mergedId && !ids.includes(mergedId));
       await terminal.command("Continue comparing both prose candidates.");
       await terminal.wait(() => calls.length > beforePickerCalls);
       await terminal.wait((screen) => screen.includes("Fixture response"));
@@ -319,11 +343,40 @@ trust_level = "trusted"
       assert.ok(continuation.includes("Codex conversation graph merge"));
       assert.ok(continuation.includes("B2: Restrained prose"));
       assert.ok(continuation.includes("C3: Forceful prose"));
+      const treeMark = terminal.screen().length;
+      const beforeSwitchCalls = calls.length;
+      await terminal.command("/tree");
+      await terminal.wait((screen) =>
+        screen.slice(treeMark).includes("Conversation tree"),
+      );
+      assert.ok(terminal.screen().slice(treeMark).includes("merge ←"));
+      // Search the exact branch ID in the live native picker and accept it.
+      terminal.input(b.id);
+      await delay(200);
+      terminal.input("\r");
+      await delay(700);
+      const verifyRollout = async (id) => {
+        const mark = terminal.screen().length;
+        await terminal.command("/rollout");
+        await terminal.wait((screen) => screen.slice(mark).includes(id));
+      };
+      await verifyRollout(b.id);
+      await terminal.command("/tree " + c.id);
+      await delay(700);
+      await verifyRollout(c.id);
+      await terminal.command("/tree " + mergedId);
+      await delay(700);
+      await verifyRollout(mergedId);
+      assert.equal(
+        calls.length,
+        beforeSwitchCalls,
+        "tree browsing and switching do not call a model",
+      );
       await terminal.save("tui-smoke-picker");
       report.cases.push({
-        name: "help, dry-run, bare picker, short merge, switch, continuation",
+        name: "tree before merge, help, preview, default synthesis, continuation, tree picker and source-to-merge switching",
         passed: true,
-        modelCallsForMerge: 0,
+        modelCallsForMerge: 1,
       });
       await terminal.command("/quit");
       await delay(1000);
@@ -338,7 +391,7 @@ trust_level = "trusted"
           b.id +
           " " +
           c.id +
-          ' --mode summary --semantic --name "Combined semantic"',
+          ' --mode summary --name "Combined semantic"',
       );
       await terminal.wait(
         (screen) => screen.includes("Branches merged. You can continue here."),
@@ -365,7 +418,7 @@ trust_level = "trusted"
           b.id +
           " " +
           c.id +
-          ' --mode summary --semantic --goal "fresh cancellation probe"',
+          ' --mode summary --goal "fresh cancellation probe"',
       );
       await terminal.wait(() => calls.length > beforeCancel, 15000);
       terminal.input("\x1b");

@@ -10,7 +10,7 @@ import {
   planMerge,
 } from "../bin/merge-context.js";
 const mergeThreads = (client, options) =>
-  mergeThreadsImpl(client, { mode: "legacy", ...options });
+  mergeThreadsImpl(client, { mode: "legacy", semantic: false, ...options });
 import {
   hash,
   loadSnapshot,

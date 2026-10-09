@@ -596,7 +596,7 @@ export async function graphMergePlan(
       ? makeFrame().frame.branches.find((v) => v.primary)
       : { records: primaryRecords.map(({ ref, json }) => ({ ref, json })) };
     let task = {
-      purpose: "optional-cross-branch-reading",
+      purpose: "cross-branch-reading",
       requestedGoal: options.goal ?? null,
       primary: primaryReading,
       branches: makeFrame().frame.branches,
@@ -636,7 +636,7 @@ export async function graphMergePlan(
             )),
         });
       task = {
-        purpose: "optional-cross-branch-reading",
+        purpose: "cross-branch-reading",
         requestedGoal: options.goal ?? null,
         primary: primaryReading,
         branches: branchReadings,
@@ -644,7 +644,7 @@ export async function graphMergePlan(
     }
     if (readingInputBytes(task, fusionBudget) > fusionInputLimit)
       throw new Error(
-        "Cross-branch reading cannot fit its bounded input; use structural merge or increase the budget",
+        "Cross-branch reading cannot fit its bounded input; use --mode reference or increase the budget",
       );
     fused = await analyzer.read(task, new Set(catalog.keys()), fusionBudget);
   }

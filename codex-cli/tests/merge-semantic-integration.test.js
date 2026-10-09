@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 import { mergeThreads as mergeThreadsImpl } from "../bin/merge-context.js";
 const mergeThreads = (client, options) =>
-  mergeThreadsImpl(client, { mode: "legacy", ...options });
+  mergeThreadsImpl(client, { mode: "legacy", semantic: false, ...options });
 import { AppServerClient } from "../bin/merge-rpc.js";
 import { hash, loadSnapshot } from "../bin/merge-history.js";
 import {

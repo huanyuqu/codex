@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { AppServerClient } from "../bin/merge-rpc.js";
 import { mergeThreads as mergeThreadsImpl } from "../bin/merge-context.js";
 const mergeThreads = (client, options) =>
-  mergeThreadsImpl(client, { mode: "legacy", ...options });
+  mergeThreadsImpl(client, { mode: "legacy", semantic: false, ...options });
 import { hash, loadSnapshot, parseMergeItem } from "../bin/merge-history.js";
 
 const nativeBinary = process.env.CODEX_MERGE_TEST_BINARY;
@@ -197,7 +197,7 @@ for (const historyMode of ["legacy", "paginated"]) {
           launcher,
           "merge",
           "--mode",
-          "legacy",
+          "reference",
           incremental.threadId,
           branches[1].id,
           "--name",
@@ -221,7 +221,7 @@ for (const historyMode of ["legacy", "paginated"]) {
             launcher,
             "merge",
             "--mode",
-            "legacy",
+            "inline",
             base.id,
             branches[0].id,
             "--max-bytes",
@@ -229,7 +229,7 @@ for (const historyMode of ["legacy", "paginated"]) {
           ],
           { env, timeout: 30000 },
         ),
-        /exceeding/,
+        /budget/,
       );
     },
   );
