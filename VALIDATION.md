@@ -1,20 +1,23 @@
 # Validation
 
-Environment: macOS arm64, Node.js 22.17.0, official native Codex CLI 0.162.0.
+Environment: macOS arm64, Node.js 22.17.0, Rust 1.98.1. The earlier regression
+used official native Codex CLI 0.162.0; the interactive feature also uses a native
+CLI compiled from this branch (development version 0.0.0).
 Git baseline: `huanyuqu/codex` main at
 `2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4`, also the fetched `openai/codex` main
-at validation time. The modified launcher uses the existing native app-server.
+at validation time. Both merge interfaces use the existing app-server protocol.
 
 ## Automated regression
 
 Run the suite with a genuine native executable:
 
 ```sh
-CODEX_MERGE_TEST_BINARY=/usr/local/bin/codex \
+CODEX_MERGE_TEST_BINARY="$PWD/codex-rs/target/debug/codex" \
+CODEX_TUI_MERGE_TEST_BINARY="$PWD/codex-rs/target/debug/codex" \
   node --test --test-reporter=spec codex-cli/tests/*.test.js
 ```
 
-89 tests passed with no failures or skips in the final regression run.
+98 tests passed with no failures or skips in the final regression run.
 
 The final suite covers the earlier deterministic/task-state merge and the new
 conversation graph compiler. Native integration tests use disposable isolated
@@ -102,14 +105,45 @@ contents are not inspected by their analysis. Planning estimates are conservativ
 byte/native-usage estimates, not an exact provider tokenizer or a guarantee about
 all hidden target instructions and future input.
 
+## Interactive CLI validation
+
+`cargo build --locked -p codex-cli --bin codex` successfully builds the native CLI.
+`cargo test --locked -p codex-tui --lib slash_command` passes 192 targeted tests,
+including command availability, quoted arguments, unavailable/busy sessions,
+multiple branch selection, and picker cancellation. This is targeted TUI coverage,
+not the full Rust workspace suite.
+
+Eight new JavaScript tests exercise the JSONL bridge using a shared app-server
+transport, early streaming notifications, no-inference short merges and previews,
+option-only picker requests, invalid arguments, cancellation before a turn reply,
+and host disconnects.
+
+The additional native terminal test uses a real Unix PTY, disposable Codex home,
+and controlled Responses provider. It verifies bare `/merge` selecting B and C,
+help and preview, a merge with zero analysis calls, automatic switching, and a
+continuation request containing both original branch deltas. A second run selects
+explicit IDs and completes two summaries plus one semantic reading. A third holds
+analysis open, presses Esc, and verifies cancellation while the current rollout
+remains A. Both successful targets retain three merge parents; source conversation
+records remain unchanged. Ordinary native resume appends thread-settings events
+to A's log, so this TUI check compares source context records rather than asserting
+that the entire runtime log is byte-identical.
+
+The checkout launcher selects the local debug build and uses its embedded
+app-server because a debug binary has no daemon installation package. The TUI
+passes merge RPCs through its current connection and opens the result with the
+existing resume flow. Native terminal coverage currently requires Unix/Python 3;
+the command/picker and bridge unit tests cover the platform-neutral code.
+
 ## Packaging and source checks
 
-All ten runtime JavaScript files (the launcher and nine merge modules) are listed
+All eleven runtime JavaScript files (the launcher and ten merge modules) are listed
 in `codex-cli/package.json`. Targeted formatting, syntax checks, `npm pack
 --dry-run`, and `git diff --check` validate the changed files and package contents.
 The source patch is checked against the pinned Git baseline in an isolated
 checkout, including new graph modules, tests, and documentation. Local source and
 patch hashes are recorded in `.upstream/source-manifest.json`.
 
-No Rust crates changed. These checks do not claim a Rust workspace build, a new
-native RPC endpoint, a Desktop merge UI, or merging source Git modifications.
+The TUI crate now includes the interactive command and bridge. These checks do
+not claim a full Rust workspace test run, a new native RPC endpoint, a Desktop
+merge UI, or merging source Git modifications.

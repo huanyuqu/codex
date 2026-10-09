@@ -77,6 +77,15 @@ if (!platformPackage) {
 }
 
 function findCodexExecutable() {
+  const override = process.env.CODEX_CONTEXT_GRAPH_BINARY;
+  if (override) {
+    if (!path.isAbsolute(override) || !existsSync(override)) {
+      throw new Error(
+        "CODEX_CONTEXT_GRAPH_BINARY must identify an existing absolute native binary path",
+      );
+    }
+    return override;
+  }
   let vendorRoot;
   try {
     const packageJsonPath = require.resolve(`${platformPackage}/package.json`);
@@ -237,12 +246,23 @@ delete env.CODEX_MANAGED_BY_BUN;
 delete env.CODEX_MANAGED_BY_PNPM;
 delete env.CODEX_MANAGED_BY_VITE_PLUS;
 env[packageManagerEnvVar] = "1";
+env.CODEX_CONTEXT_MERGE_SCRIPT = path.join(__dirname, "merge-ui.js");
+env.CODEX_CONTEXT_MERGE_NODE = process.execPath;
 if (process.argv[2] === "merge") {
   const { runMergeCommand } = await import("./merge-cli.js");
   process.exit(await runMergeCommand(binaryPath, env, process.argv.slice(3)));
 }
 
-const child = spawn(binaryPath, process.argv.slice(2), {
+const nativeArgs = process.argv.slice(2);
+// A debug build has no daemon package. Use its embedded server for local chats.
+if (
+  env.CODEX_CONTEXT_MERGE_NO_DAEMON === "1" &&
+  !nativeArgs.includes("--no-daemon") &&
+  !nativeArgs.some((arg) => arg === "agents" || arg.startsWith("--remote"))
+) {
+  nativeArgs.unshift("--no-daemon");
+}
+const child = spawn(binaryPath, nativeArgs, {
   stdio: "inherit",
   env,
 });

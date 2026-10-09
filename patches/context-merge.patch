@@ -25,27 +25,30 @@ index 06b02fced..6a86555c2 100644
 +This fork adds conversation context merging in the npm CLI. See [the merge guide](docs/context_merge.md) and [local checkout instructions](docs/context_merge_checkout.md).
 diff --git a/VALIDATION.md b/VALIDATION.md
 new file mode 100644
-index 000000000..714bab249
+index 000000000..811980d2d
 --- /dev/null
 +++ b/VALIDATION.md
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,149 @@
 +# Validation
 +
-+Environment: macOS arm64, Node.js 22.17.0, official native Codex CLI 0.162.0.
++Environment: macOS arm64, Node.js 22.17.0, Rust 1.98.1. The earlier regression
++used official native Codex CLI 0.162.0; the interactive feature also uses a native
++CLI compiled from this branch (development version 0.0.0).
 +Git baseline: `huanyuqu/codex` main at
 +`2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4`, also the fetched `openai/codex` main
-+at validation time. The modified launcher uses the existing native app-server.
++at validation time. Both merge interfaces use the existing app-server protocol.
 +
 +## Automated regression
 +
 +Run the suite with a genuine native executable:
 +
 +```sh
-+CODEX_MERGE_TEST_BINARY=/usr/local/bin/codex \
++CODEX_MERGE_TEST_BINARY="$PWD/codex-rs/target/debug/codex" \
++CODEX_TUI_MERGE_TEST_BINARY="$PWD/codex-rs/target/debug/codex" \
 +  node --test --test-reporter=spec codex-cli/tests/*.test.js
 +```
 +
-+89 tests passed with no failures or skips in the final regression run.
++98 tests passed with no failures or skips in the final regression run.
 +
 +The final suite covers the earlier deterministic/task-state merge and the new
 +conversation graph compiler. Native integration tests use disposable isolated
@@ -133,41 +136,107 @@ index 000000000..714bab249
 +byte/native-usage estimates, not an exact provider tokenizer or a guarantee about
 +all hidden target instructions and future input.
 +
++## Interactive CLI validation
++
++`cargo build --locked -p codex-cli --bin codex` successfully builds the native CLI.
++`cargo test --locked -p codex-tui --lib slash_command` passes 192 targeted tests,
++including command availability, quoted arguments, unavailable/busy sessions,
++multiple branch selection, and picker cancellation. This is targeted TUI coverage,
++not the full Rust workspace suite.
++
++Eight new JavaScript tests exercise the JSONL bridge using a shared app-server
++transport, early streaming notifications, no-inference short merges and previews,
++option-only picker requests, invalid arguments, cancellation before a turn reply,
++and host disconnects.
++
++The additional native terminal test uses a real Unix PTY, disposable Codex home,
++and controlled Responses provider. It verifies bare `/merge` selecting B and C,
++help and preview, a merge with zero analysis calls, automatic switching, and a
++continuation request containing both original branch deltas. A second run selects
++explicit IDs and completes two summaries plus one semantic reading. A third holds
++analysis open, presses Esc, and verifies cancellation while the current rollout
++remains A. Both successful targets retain three merge parents; source conversation
++records remain unchanged. Ordinary native resume appends thread-settings events
++to A's log, so this TUI check compares source context records rather than asserting
++that the entire runtime log is byte-identical.
++
++The checkout launcher selects the local debug build and uses its embedded
++app-server because a debug binary has no daemon installation package. The TUI
++passes merge RPCs through its current connection and opens the result with the
++existing resume flow. Native terminal coverage currently requires Unix/Python 3;
++the command/picker and bridge unit tests cover the platform-neutral code.
++
 +## Packaging and source checks
 +
-+All ten runtime JavaScript files (the launcher and nine merge modules) are listed
++All eleven runtime JavaScript files (the launcher and ten merge modules) are listed
 +in `codex-cli/package.json`. Targeted formatting, syntax checks, `npm pack
 +--dry-run`, and `git diff --check` validate the changed files and package contents.
 +The source patch is checked against the pinned Git baseline in an isolated
 +checkout, including new graph modules, tests, and documentation. Local source and
 +patch hashes are recorded in `.upstream/source-manifest.json`.
 +
-+No Rust crates changed. These checks do not claim a Rust workspace build, a new
-+native RPC endpoint, a Desktop merge UI, or merging source Git modifications.
++The TUI crate now includes the interactive command and bridge. These checks do
++not claim a full Rust workspace test run, a new native RPC endpoint, a Desktop
++merge UI, or merging source Git modifications.
 diff --git a/codex b/codex
 new file mode 100755
-index 000000000..f9dd660e8
+index 000000000..eeff7e0f6
 --- /dev/null
 +++ b/codex
-@@ -0,0 +1,2 @@
+@@ -0,0 +1,7 @@
 +#!/bin/sh
++codex_checkout_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++if [ -z "${CODEX_CONTEXT_GRAPH_BINARY:-}" ] && [ -x "$codex_checkout_dir/codex-rs/target/debug/codex" ]; then
++  export CODEX_CONTEXT_GRAPH_BINARY="$codex_checkout_dir/codex-rs/target/debug/codex"
++  export CODEX_CONTEXT_MERGE_NO_DAEMON=1
++fi
 +exec node "$(dirname "$0")/codex-cli/bin/codex.js" "$@"
 diff --git a/codex-cli/bin/codex.js b/codex-cli/bin/codex.js
-index 934600714..6efe8e3ef 100755
+index 934600714..cb7385785 100755
 --- a/codex-cli/bin/codex.js
 +++ b/codex-cli/bin/codex.js
-@@ -237,6 +237,10 @@ delete env.CODEX_MANAGED_BY_BUN;
+@@ -77,6 +77,15 @@ if (!platformPackage) {
+ }
+
+ function findCodexExecutable() {
++  const override = process.env.CODEX_CONTEXT_GRAPH_BINARY;
++  if (override) {
++    if (!path.isAbsolute(override) || !existsSync(override)) {
++      throw new Error(
++        "CODEX_CONTEXT_GRAPH_BINARY must identify an existing absolute native binary path",
++      );
++    }
++    return override;
++  }
+   let vendorRoot;
+   try {
+     const packageJsonPath = require.resolve(`${platformPackage}/package.json`);
+@@ -237,8 +246,23 @@ delete env.CODEX_MANAGED_BY_BUN;
  delete env.CODEX_MANAGED_BY_PNPM;
  delete env.CODEX_MANAGED_BY_VITE_PLUS;
  env[packageManagerEnvVar] = "1";
++env.CODEX_CONTEXT_MERGE_SCRIPT = path.join(__dirname, "merge-ui.js");
++env.CODEX_CONTEXT_MERGE_NODE = process.execPath;
 +if (process.argv[2] === "merge") {
 +  const { runMergeCommand } = await import("./merge-cli.js");
 +  process.exit(await runMergeCommand(binaryPath, env, process.argv.slice(3)));
 +}
 
- const child = spawn(binaryPath, process.argv.slice(2), {
+-const child = spawn(binaryPath, process.argv.slice(2), {
++const nativeArgs = process.argv.slice(2);
++// A debug build has no daemon package. Use its embedded server for local chats.
++if (
++  env.CODEX_CONTEXT_MERGE_NO_DAEMON === "1" &&
++  !nativeArgs.includes("--no-daemon") &&
++  !nativeArgs.some((arg) => arg === "agents" || arg.startsWith("--remote"))
++) {
++  nativeArgs.unshift("--no-daemon");
++}
++const child = spawn(binaryPath, nativeArgs, {
    stdio: "inherit",
-@@ -291,5 +295,13 @@ if (childResult.type === "signal") {
+   env,
+ });
+@@ -291,5 +315,13 @@ if (childResult.type === "signal") {
    // semantics (this also sets the correct exit code of 128 + n).
    process.kill(process.pid, childResult.signal);
  } else {
@@ -409,10 +478,10 @@ index 000000000..5005c18c1
 +}
 diff --git a/codex-cli/bin/merge-cli.js b/codex-cli/bin/merge-cli.js
 new file mode 100644
-index 000000000..042c7cf53
+index 000000000..5abc80336
 --- /dev/null
 +++ b/codex-cli/bin/merge-cli.js
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,303 @@
 +import { spawn } from "node:child_process";
 +import path from "node:path";
 +import { AppServerClient } from "./merge-rpc.js";
@@ -457,7 +526,7 @@ index 000000000..042c7cf53
 +  codex merge graph <ARCHIVE_PATH> [--json | --mermaid]
 +`;
 +
-+export function parseMergeArgs(args) {
++export function parseMergeArgs(args, { allowSinglePrimary = false } = {}) {
 +  const options = {
 +    threadIds: [],
 +    config: [],
@@ -579,7 +648,7 @@ index 000000000..042c7cf53
 +    options.maxInputBytes ??= DEFAULT_MAX_INPUT_BYTES;
 +  }
 +  if (
-+    options.threadIds.length < 2 ||
++    options.threadIds.length < (allowSinglePrimary ? 1 : 2) ||
 +    options.threadIds.length > 32 ||
 +    new Set(options.threadIds).size !== options.threadIds.length
 +  )
@@ -595,6 +664,7 @@ index 000000000..042c7cf53
 +
 +async function resume(binaryPath, env, result, options) {
 +  const args = [
++    ...(env.CODEX_CONTEXT_MERGE_NO_DAEMON === "1" ? ["--no-daemon"] : []),
 +    ...options.config.flatMap((value) => ["-c", value]),
 +    ...(options.cwd ? ["-C", options.cwd] : []),
 +    "resume",
@@ -2742,10 +2812,10 @@ index 000000000..55f04a899
 +}
 diff --git a/codex-cli/bin/merge-rpc.js b/codex-cli/bin/merge-rpc.js
 new file mode 100644
-index 000000000..1f6257f2a
+index 000000000..c13f9449d
 --- /dev/null
 +++ b/codex-cli/bin/merge-rpc.js
-@@ -0,0 +1,281 @@
+@@ -0,0 +1,314 @@
 +import { spawn } from "node:child_process";
 +import { createInterface } from "node:readline";
 +
@@ -2758,51 +2828,24 @@ index 000000000..1f6257f2a
 +  }
 +}
 +
-+/** A private app-server connection. Inference is explicit through runTurn. */
-+export class AppServerClient {
-+  constructor(
-+    binaryPath,
-+    { env = process.env, config = [], timeoutMs = 30000 } = {},
-+  ) {
++/** JSON-RPC and turn streaming over an already connected transport. */
++export class JsonRpcClient {
++  constructor({
++    env = process.env,
++    timeoutMs = 30000,
++    write,
++    signal,
++    idPrefix = "",
++  } = {}) {
 +    this.env = env;
 +    this.nextId = 1;
 +    this.pending = new Map();
 +    this.notifications = new Set();
 +    this.timeoutMs = timeoutMs;
 +    this.failure = null;
-+    this.child = spawn(
-+      binaryPath,
-+      [
-+        "app-server",
-+        "--listen",
-+        "stdio://",
-+        ...config.flatMap((value) => ["-c", value]),
-+      ],
-+      {
-+        env,
-+        stdio: ["pipe", "pipe", "pipe"],
-+        windowsHide: true,
-+      },
-+    );
-+    // Drain logs without including potentially private diagnostics in errors.
-+    this.child.stderr.resume();
-+    this.lines = createInterface({
-+      input: this.child.stdout,
-+      crlfDelay: Infinity,
-+    });
-+    this.lines.on("line", (line) => this.receive(line));
-+    this.child.on("error", (error) =>
-+      this.fail(new Error(`Cannot start Codex app-server: ${error.message}`)),
-+    );
-+    this.child.stdin.on("error", (error) =>
-+      this.fail(new Error(`Codex app-server input closed: ${error.message}`)),
-+    );
-+    this.exited = new Promise((resolve) => {
-+      this.child.once("close", (code, signal) => {
-+        this.fail(new Error(`Codex app-server closed (${signal ?? code})`));
-+        resolve();
-+      });
-+    });
++    this.sendMessage = write;
++    this.signal = signal;
++    this.idPrefix = idPrefix;
 +  }
 +
 +  receive(line) {
@@ -2862,6 +2905,8 @@ index 000000000..1f6257f2a
 +    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)
 +      return Promise.reject(new Error("Invalid inference timeout"));
 +    if (this.failure) return Promise.reject(this.failure);
++    if (this.signal?.aborted)
++      return Promise.reject(new Error("Conversation merge cancelled"));
 +    return new Promise((resolve, reject) => {
 +      let turnId;
 +      let done = false;
@@ -2872,6 +2917,7 @@ index 000000000..1f6257f2a
 +        done = true;
 +        clearTimeout(timer);
 +        unsubscribe();
++        this.signal?.removeEventListener("abort", onAbort);
 +        if (error) reject(error);
 +        else resolve(result);
 +      };
@@ -2955,6 +3001,11 @@ index 000000000..1f6257f2a
 +        finish(new Error("Timed out waiting for Codex semantic analysis"));
 +        interrupt();
 +      }, timeoutMs);
++      const onAbort = () => {
++        finish(new Error("Conversation merge cancelled"));
++        interrupt();
++      };
++      this.signal?.addEventListener("abort", onAbort, { once: true });
 +      this.request("turn/start", params).then(
 +        (result) => {
 +          turnId = result.turn?.id;
@@ -2979,12 +3030,19 @@ index 000000000..1f6257f2a
 +
 +  write(message) {
 +    if (this.failure) throw this.failure;
-+    this.child.stdin.write(`${JSON.stringify(message)}\n`);
++    this.sendMessage(message);
 +  }
 +
 +  request(method, params) {
 +    if (this.failure) return Promise.reject(this.failure);
-+    const id = this.nextId++;
++    if (
++      this.signal?.aborted &&
++      !["turn/interrupt", "thread/unsubscribe", "thread/archive"].includes(
++        method,
++      )
++    )
++      return Promise.reject(new Error("Conversation merge cancelled"));
++    const id = this.idPrefix ? this.idPrefix + this.nextId++ : this.nextId++;
 +    return new Promise((resolve, reject) => {
 +      const timer = setTimeout(() => {
 +        this.pending.delete(id);
@@ -2999,6 +3057,51 @@ index 000000000..1f6257f2a
 +        reject(error);
 +      }
 +    });
++  }
++}
++
++/** A private app-server connection. Inference is explicit through runTurn. */
++export class AppServerClient extends JsonRpcClient {
++  constructor(
++    binaryPath,
++    { env = process.env, config = [], timeoutMs = 30000 } = {},
++  ) {
++    super({ env, timeoutMs });
++    this.child = spawn(
++      binaryPath,
++      [
++        "app-server",
++        "--listen",
++        "stdio://",
++        ...config.flatMap((value) => ["-c", value]),
++      ],
++      {
++        env,
++        stdio: ["pipe", "pipe", "pipe"],
++        windowsHide: true,
++      },
++    );
++    // Drain logs without including potentially private diagnostics in errors.
++    this.child.stderr.resume();
++    this.lines = createInterface({
++      input: this.child.stdout,
++      crlfDelay: Infinity,
++    });
++    this.lines.on("line", (line) => this.receive(line));
++    this.child.on("error", (error) =>
++      this.fail(new Error(`Cannot start Codex app-server: ${error.message}`)),
++    );
++    this.child.stdin.on("error", (error) =>
++      this.fail(new Error(`Codex app-server input closed: ${error.message}`)),
++    );
++    this.exited = new Promise((resolve) => {
++      this.child.once("close", (code, signal) => {
++        this.fail(new Error(`Codex app-server closed (${signal ?? code})`));
++        resolve();
++      });
++    });
++    this.sendMessage = (message) =>
++      this.child.stdin.write(`${JSON.stringify(message)}\n`);
 +  }
 +
 +  async initialize() {
@@ -3578,6 +3681,114 @@ index 000000000..c73325dab
 +    }
 +  }
 +}
+diff --git a/codex-cli/bin/merge-ui.js b/codex-cli/bin/merge-ui.js
+new file mode 100644
+index 000000000..b72b6bfd0
+--- /dev/null
++++ b/codex-cli/bin/merge-ui.js
+@@ -0,0 +1,102 @@
++import { randomUUID } from "node:crypto";
++import { createInterface } from "node:readline";
++import { JsonRpcClient } from "./merge-rpc.js";
++import { parseMergeArgs } from "./merge-cli.js";
++import { mergeThreads } from "./merge-context.js";
++
++// The TUI owns the native app-server connection. Only requests and results
++// cross this pipe; the existing engine performs the same graph merge as CLI.
++const emit = (message) => process.stdout.write(JSON.stringify(message) + "\n");
++const abort = new AbortController();
++const client = new JsonRpcClient({
++  write: (message) => emit({ type: "rpc", message }),
++  signal: abort.signal,
++  idPrefix: "context-merge-" + randomUUID() + "-",
++});
++const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
++let started = false;
++let finished = false;
++
++process.stdout.on("error", (error) => {
++  finished = true;
++  abort.abort();
++  client.fail(error);
++  lines.close();
++  process.stdin.destroy();
++  process.exitCode = 1;
++});
++
++async function run(message) {
++  try {
++    const options = parseMergeArgs([message.primaryThreadId, ...message.args], {
++      allowSinglePrimary: true,
++    });
++    if (options.help) {
++      emit({
++        type: "result",
++        result: {
++          help: "Usage: /merge [BRANCH_ID...] [--mode auto|inline|summary|reference] [--semantic] [--goal TEXT] [--dry-run]\nThe current chat is the primary. Without branch IDs, /merge opens a multi-select picker. Successful merges open the new chat.",
++        },
++      });
++      return;
++    }
++    if (options.config.length || options.cwd || options.resume || options.json)
++      throw new Error(
++        "/merge uses the current CLI connection; omit --config, --cd, --resume and --json",
++      );
++    if (options.threadIds.length === 1) {
++      emit({
++        type: "result",
++        result: { selectBranches: true, args: message.args },
++      });
++      return;
++    }
++    options.model ??= message.model;
++    emit({
++      type: "progress",
++      text: "Merging conversation context; long branches may need summaries. Esc cancels.",
++    });
++    const result = await mergeThreads(client, options);
++    emit({ type: "result", result });
++  } catch (error) {
++    emit({ type: "error", message: error.message });
++    process.exitCode = 1;
++  } finally {
++    finished = true;
++    lines.close();
++    process.stdin.destroy();
++    client.fail(new Error("Conversation merge helper finished"));
++  }
++}
++
++lines.on("line", (line) => {
++  try {
++    const message = JSON.parse(line);
++    if (message.type === "start" && !started) {
++      started = true;
++      if (
++        typeof message.primaryThreadId !== "string" ||
++        !Array.isArray(message.args) ||
++        message.args.some((arg) => typeof arg !== "string")
++      )
++        throw new Error("Invalid conversation merge request");
++      void run(message);
++    } else if (message.type === "rpc" && started)
++      client.receive(JSON.stringify(message.message));
++    else if (message.type === "cancel") abort.abort();
++    else throw new Error("Invalid conversation merge bridge message");
++  } catch (error) {
++    client.fail(error);
++    emit({ type: "error", message: error.message });
++    lines.close();
++    process.stdin.destroy();
++    process.exitCode = 1;
++  }
++});
++lines.on("close", () => {
++  if (!finished) {
++    abort.abort();
++    client.fail(new Error("Conversation merge bridge closed"));
++    process.exitCode = 1;
++  }
++});
 diff --git a/codex-cli/bin/merge-views.js b/codex-cli/bin/merge-views.js
 new file mode 100644
 index 000000000..c3b83b8cb
@@ -4297,10 +4508,10 @@ index 000000000..c3b83b8cb
 +  };
 +}
 diff --git a/codex-cli/package.json b/codex-cli/package.json
-index 7d3a49405..431debfc7 100644
+index 7d3a49405..93c09a116 100644
 --- a/codex-cli/package.json
 +++ b/codex-cli/package.json
-@@ -11,7 +11,16 @@
+@@ -11,7 +11,17 @@
      "node": ">=16"
    },
    "files": [
@@ -4314,7 +4525,8 @@ index 7d3a49405..431debfc7 100644
 +    "bin/merge-semantic.js",
 +    "bin/merge-graph.js",
 +    "bin/merge-views.js",
-+    "bin/merge-analysis.js"
++    "bin/merge-analysis.js",
++    "bin/merge-ui.js"
    ],
    "repository": {
      "type": "git",
@@ -4626,6 +4838,83 @@ index 000000000..f13902610
 +          ],
 +  };
 +}
+diff --git a/codex-cli/tests/fixtures/tui-pty.py b/codex-cli/tests/fixtures/tui-pty.py
+new file mode 100644
+index 000000000..4edd8dfbb
+--- /dev/null
++++ b/codex-cli/tests/fixtures/tui-pty.py
+@@ -0,0 +1,71 @@
++"""Run a CLI in a controlling terminal and forward input/output as JSONL."""
++
++import base64
++import errno
++import fcntl
++import json
++import os
++import pty
++import select
++import signal
++import struct
++import sys
++import termios
++
++pid, master = pty.fork()
++if pid == 0:
++    os.execvpe(sys.argv[1], sys.argv[1:], os.environ)
++fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 36, 140, 0, 0))
++pending = b""
++probe = b""
++def emit(message):
++    print(json.dumps(message), flush=True)
++
++try:
++    while True:
++        readable, _, _ = select.select([master, sys.stdin], [], [], 0.1)
++        if master in readable:
++            try:
++                data = os.read(master, 65536)
++            except OSError as error:
++                if error.errno == errno.EIO:
++                    break
++                raise
++            if not data:
++                break
++            emit({"type": "output", "data": base64.b64encode(data).decode()})
++            probe += data
++            probes = [
++                (b"\x1b[6n", b"\x1b[1;1R"),
++                (b"\x1b[?u", b"\x1b[?0u"),
++                (b"\x1b[c", b"\x1b[?62;4;6;22c"),
++                (b"\x1b]10;?\x07", b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"),
++                (b"\x1b]11;?\x07", b"\x1b]11;rgb:0000/0000/0000\x1b\\"),
++            ]
++            for request, response in probes:
++                while request in probe:
++                    os.write(master, response)
++                    probe = probe.replace(request, b"", 1)
++            probe = probe[-128:]
++        if sys.stdin in readable:
++            data = os.read(sys.stdin.fileno(), 65536)
++            if not data:
++                break
++            pending += data
++            while b"\n" in pending:
++                line, pending = pending.split(b"\n", 1)
++                command = json.loads(line)
++                if command.get("type") == "input":
++                    os.write(master, base64.b64decode(command["data"]))
++                elif command.get("type") == "stop":
++                    os.kill(pid, signal.SIGTERM)
++        waited, status = os.waitpid(pid, os.WNOHANG)
++        if waited:
++            emit({"type": "exit", "status": status})
++            break
++finally:
++    os.close(master)
++    try:
++        os.killpg(pid, signal.SIGTERM)
++    except ProcessLookupError:
++        pass
 diff --git a/codex-cli/tests/merge-graph-integration.test.js b/codex-cli/tests/merge-graph-integration.test.js
 new file mode 100644
 index 000000000..145b42471
@@ -7024,6 +7313,463 @@ index 000000000..6321379d2
 +  assert.ok(client.calls.some((c) => c.method === "thread/archive"));
 +  assert.ok(!client.calls.some((c) => c.method === "thread/inject_items"));
 +});
+diff --git a/codex-cli/tests/merge-tui-integration.test.js b/codex-cli/tests/merge-tui-integration.test.js
+new file mode 100644
+index 000000000..828b2b403
+--- /dev/null
++++ b/codex-cli/tests/merge-tui-integration.test.js
+@@ -0,0 +1,451 @@
++import assert from "node:assert/strict";
++import { createServer } from "node:http";
++import { spawn, spawnSync } from "node:child_process";
++import { createInterface } from "node:readline";
++import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
++import os from "node:os";
++import path from "node:path";
++import { setTimeout as delay } from "node:timers/promises";
++import { AppServerClient } from "../bin/merge-rpc.js";
++import { hash, loadSnapshot } from "../bin/merge-history.js";
++import { parseGraphItem } from "../bin/merge-graph.js";
++import { readEvidence } from "../bin/merge-evidence.js";
++import { fixtureReading, message } from "./fixtures/graph.js";
++
++import test from "node:test";
++import { fileURLToPath } from "node:url";
++
++const binary = process.env.CODEX_TUI_MERGE_TEST_BINARY;
++const hasPty =
++  process.platform !== "win32" &&
++  spawnSync("python3", ["--version"]).status === 0;
++
++test(
++  "native /merge: picker, shared ownership, continuation, semantic reading and cancellation",
++  { skip: !binary || !hasPty, timeout: 120000 },
++  async (t) => {
++    const root = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
++    const home = await mkdtemp(path.join(os.tmpdir(), "codex-tui-merge-"));
++    const calls = [];
++    let holdAnalysis = false;
++    let client;
++    let terminal;
++    const server = createServer(async (req, res) => {
++      const chunks = [];
++      for await (const chunk of req) chunks.push(chunk);
++      const body = JSON.parse(Buffer.concat(chunks).toString());
++      calls.push(body);
++      const prompt = body.input
++        .flatMap((item) => item.content ?? [])
++        .find((part) =>
++          part.text?.startsWith("Read the historical conversation material"),
++        );
++      let text = "Fixture response: both viewpoints retain their scopes.";
++      if (prompt) {
++        const task = JSON.parse(prompt.text.split("\n").at(-1));
++        text = JSON.stringify(fixtureReading(task));
++      }
++      res.writeHead(200, { "content-type": "text/event-stream" });
++      const emit = (event) =>
++        res.write(
++          "event: " + event.type + "\ndata: " + JSON.stringify(event) + "\n\n",
++        );
++      const id = "response-" + calls.length;
++      emit({
++        type: "response.created",
++        response: { id, object: "response", status: "in_progress", output: [] },
++      });
++      if (prompt && holdAnalysis) return;
++      const item = {
++        type: "message",
++        id: "msg-" + calls.length,
++        role: "assistant",
++        phase: "final_answer",
++        content: [{ type: "output_text", text, annotations: [] }],
++      };
++      emit({
++        type: "response.output_item.added",
++        output_index: 0,
++        item: { ...item, content: [] },
++      });
++      emit({
++        type: "response.output_text.delta",
++        output_index: 0,
++        item_id: item.id,
++        content_index: 0,
++        delta: text,
++      });
++      emit({ type: "response.output_item.done", output_index: 0, item });
++      emit({
++        type: "response.completed",
++        response: {
++          id,
++          object: "response",
++          status: "completed",
++          output: [item],
++          usage: { input_tokens: 100, output_tokens: 30, total_tokens: 130 },
++        },
++      });
++      res.end();
++    });
++    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
++    const url = "http://127.0.0.1:" + server.address().port + "/v1";
++    const env = {
++      ...process.env,
++      CODEX_HOME: home,
++      TERM: "xterm-256color",
++      CODEX_CONTEXT_GRAPH_BINARY: binary,
++      CODEX_CONTEXT_MERGE_NO_DAEMON: "1",
++    };
++    const config = `model = "graph-fixture"
++model_provider = "graph_fixture"
++model_reasoning_effort = "low"
++model_context_window = 32768
++approval_policy = "never"
++sandbox_mode = "read-only"
++[model_providers.graph_fixture]
++name = "Graph fixture"
++base_url = "${url}"
++wire_api = "responses"
++requires_openai_auth = false
++supports_websockets = false
++[projects."${root}"]
++trust_level = "trusted"
++`;
++    await writeFile(path.join(home, "config.toml"), config);
++
++    function startTerminal(threadId) {
++      const child = spawn(
++        "python3",
++        [
++          fileURLToPath(new URL("./fixtures/tui-pty.py", import.meta.url)),
++          process.execPath,
++          path.join(root, "codex-cli/bin/codex.js"),
++          "--no-alt-screen",
++          "resume",
++          threadId,
++        ],
++        { env, stdio: ["pipe", "pipe", "pipe"], cwd: root },
++      );
++      const lines = createInterface({ input: child.stdout });
++      let raw = "";
++      let stderr = "";
++      child.stderr.on("data", (chunk) => {
++        stderr += chunk;
++      });
++      lines.on("line", (line) => {
++        const event = JSON.parse(line);
++        if (event.type === "output")
++          raw += Buffer.from(event.data, "base64").toString("utf8");
++      });
++      const screen = () =>
++        raw
++          .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
++          .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
++      const input = (data) =>
++        child.stdin.write(
++          JSON.stringify({
++            type: "input",
++            data: Buffer.from(data).toString("base64"),
++          }) + "\n",
++        );
++      const command = async (text) => {
++        input("\x1b[200~" + text + "\x1b[201~");
++        await delay(180);
++        input("\r");
++      };
++      const wait = async (predicate, timeout = 20000) => {
++        const limit = Date.now() + timeout;
++        while (!predicate(screen())) {
++          if (Date.now() > limit) {
++            await writeFile(
++              path.join(home, "tui-smoke-last-screen.txt"),
++              screen(),
++            );
++            await writeFile(path.join(home, "tui-smoke-last-raw.txt"), raw);
++            throw new Error(
++              "Timed out waiting for terminal state\n" +
++                screen().slice(-6000) +
++                stderr,
++            );
++          }
++          await delay(50);
++        }
++      };
++      return {
++        child,
++        lines,
++        screen,
++        input,
++        command,
++        wait,
++        save: async (name) => {
++          await writeFile(path.join(home, "" + name + ".txt"), screen());
++        },
++        stop: async () => {
++          child.stdin.write(JSON.stringify({ type: "stop" }) + "\n");
++          await delay(150);
++          child.kill();
++          lines.close();
++        },
++      };
++    }
++
++    const report = { binary, cases: [] };
++    try {
++      client = new AppServerClient(binary, { env });
++      await client.initialize();
++      const { thread: a } = await client.request("thread/start", {
++        cwd: root,
++        historyMode: "legacy",
++      });
++      await client.runTurn({
++        threadId: a.id,
++        input: [
++          { type: "text", text: "A1: Compare restrained and forceful prose." },
++        ],
++      });
++      const { thread: b } = await client.request("thread/fork", {
++        threadId: a.id,
++        excludeTurns: true,
++      });
++      await client.request("thread/name/set", {
++        threadId: b.id,
++        name: "Branch B restrained prose",
++      });
++      await client.request("thread/inject_items", {
++        threadId: b.id,
++        items: [
++          message(
++            "B2: Restrained prose is a suggestion, not a final choice.",
++            "b2",
++            "assistant",
++          ),
++        ],
++      });
++      await client.runTurn({
++        threadId: a.id,
++        input: [
++          {
++            type: "text",
++            text: "A2: Preserve reader knowledge and uncertainty.",
++          },
++        ],
++      });
++      const { thread: c } = await client.request("thread/fork", {
++        threadId: a.id,
++        excludeTurns: true,
++      });
++      await client.request("thread/name/set", {
++        threadId: c.id,
++        name: "Branch C forceful prose",
++      });
++      await client.request("thread/inject_items", {
++        threadId: c.id,
++        items: [
++          message(
++            "C3: Forceful prose is another candidate; retain uncertainty.",
++            "c3",
++            "assistant",
++          ),
++        ],
++      });
++      await client.runTurn({
++        threadId: a.id,
++        input: [
++          {
++            type: "text",
++            text: "A3: Keep both candidates without choosing one.",
++          },
++        ],
++      });
++      const ids = [a.id, b.id, c.id];
++      const originals = await Promise.all(
++        ids.map(async (id) => {
++          const snapshot = await loadSnapshot(client, id);
++          return {
++            id,
++            path: snapshot.thread.path,
++            sha: hash(await readFile(snapshot.thread.path)),
++            content: await readFile(snapshot.thread.path, "utf8"),
++            records: snapshot.records.map((r) => r.json),
++          };
++        }),
++      );
++      await client.close();
++
++      terminal = startTerminal(a.id);
++      await terminal.wait((screen) => screen.includes("graph-fixture"));
++      await delay(700);
++      await terminal.command("/merge --help");
++      await terminal.wait((screen) => screen.includes("Usage: /merge"));
++      await terminal.command("/merge " + b.id + " " + c.id + " --dry-run");
++      await terminal.wait((screen) => screen.includes("Merge preview:"));
++      const beforePickerCalls = calls.length;
++      await terminal.command("/merge");
++      await terminal.wait((screen) =>
++        screen.includes("Merge branches into this chat"),
++      );
++      assert.ok(terminal.screen().includes("Branch B"));
++      assert.ok(terminal.screen().includes("Branch C"));
++      for (const key of [" ", "\x1b[B", " ", "\r"]) {
++        terminal.input(key);
++        await delay(100);
++      }
++      await terminal.wait((screen) =>
++        screen.includes("Branches merged. You can continue here."),
++      );
++      assert.equal(
++        calls.length,
++        beforePickerCalls,
++        "short merge makes no inference calls",
++      );
++      await terminal.command("Continue comparing both prose candidates.");
++      await terminal.wait(() => calls.length > beforePickerCalls);
++      await terminal.wait((screen) => screen.includes("Fixture response"));
++      await delay(500);
++      await terminal.save("tui-smoke-picker");
++      await writeFile(
++        path.join(home, "tui-smoke-requests.json"),
++        JSON.stringify(calls, null, 2),
++      );
++      const continuation = JSON.stringify(
++        calls.find((body) =>
++          JSON.stringify(body.input).includes(
++            "Continue comparing both prose candidates.",
++          ),
++        ),
++      );
++      assert.ok(continuation.includes("Codex conversation graph merge"));
++      assert.ok(continuation.includes("B2: Restrained prose"));
++      assert.ok(continuation.includes("C3: Forceful prose"));
++      await terminal.save("tui-smoke-picker");
++      report.cases.push({
++        name: "help, dry-run, bare picker, short merge, switch, continuation",
++        passed: true,
++        modelCallsForMerge: 0,
++      });
++      await terminal.command("/quit");
++      await delay(1000);
++      await terminal.stop();
++
++      terminal = startTerminal(a.id);
++      await terminal.wait((screen) => screen.includes("graph-fixture"));
++      await delay(700);
++      const beforeSummary = calls.length;
++      await terminal.command(
++        "/merge " +
++          b.id +
++          " " +
++          c.id +
++          ' --mode summary --semantic --name "Combined semantic"',
++      );
++      await terminal.wait(
++        (screen) => screen.includes("Branches merged. You can continue here."),
++        30000,
++      );
++      assert.equal(calls.length - beforeSummary, 3);
++      await terminal.save("tui-smoke-semantic");
++      report.cases.push({
++        name: "inline IDs, summary and semantic reading, switch",
++        passed: true,
++        modelCallsForMerge: 3,
++      });
++      await terminal.command("/quit");
++      await delay(1000);
++      await terminal.stop();
++
++      terminal = startTerminal(a.id);
++      await terminal.wait((screen) => screen.includes("graph-fixture"));
++      await delay(700);
++      holdAnalysis = true;
++      const beforeCancel = calls.length;
++      await terminal.command(
++        "/merge " +
++          b.id +
++          " " +
++          c.id +
++          ' --mode summary --semantic --goal "fresh cancellation probe"',
++      );
++      await terminal.wait(() => calls.length > beforeCancel, 15000);
++      terminal.input("\x1b");
++      await terminal.wait(
++        (screen) => screen.includes("Conversation merge cancelled."),
++        20000,
++      );
++      holdAnalysis = false;
++      const beforeRollout = terminal.screen().length;
++      await terminal.command("/rollout");
++      await terminal.wait((screen) =>
++        screen.slice(beforeRollout).includes(a.id),
++      );
++      await terminal.save("tui-smoke-cancel");
++      report.cases.push({
++        name: "Esc during inference keeps primary and releases analyses",
++        passed: true,
++      });
++      await terminal.command("/quit");
++      await delay(1000);
++      await terminal.stop();
++
++      client = new AppServerClient(binary, { env });
++      await client.initialize();
++      for (const source of originals) {
++        const after = await readFile(source.path, "utf8");
++        if (hash(after) !== source.sha) {
++          await writeFile(
++            path.join(home, "tui-smoke-source-before.jsonl"),
++            source.content,
++          );
++          await writeFile(
++            path.join(home, "tui-smoke-source-after.jsonl"),
++            after,
++          );
++        }
++        const snapshot = await loadSnapshot(client, source.id);
++        assert.deepEqual(
++          snapshot.records.map((r) => r.json),
++          source.records,
++          source.id + " context",
++        );
++      }
++      const threads = await client.request("thread/list", {
++        modelProviders: [],
++        limit: 100,
++      });
++      const merged = [];
++      for (const thread of threads.data) {
++        if (ids.includes(thread.id)) continue;
++        const snapshot = await loadSnapshot(client, thread.id);
++        const capsule = snapshot.records
++          .map((r) => parseGraphItem(JSON.parse(r.json)))
++          .find(Boolean);
++        if (capsule) {
++          const evidence = await readEvidence(capsule.evidence);
++          assert.equal(
++            evidence.graph.nodes.find(
++              (n) => n.id === evidence.graph.mergeNodeId,
++            ).parents.length,
++            3,
++          );
++          merged.push(thread.id);
++        }
++      }
++      assert.equal(merged.length, 2);
++      report.sourceContextsUnchanged = true;
++      report.savedMerges = merged;
++      report.totalModelRequests = calls.length;
++      await writeFile(
++        path.join(home, "tui-smoke-report.json"),
++        JSON.stringify(report, null, 2) + "\n",
++      );
++      t.diagnostic(JSON.stringify(report));
++    } finally {
++      if (terminal) await terminal.stop().catch(() => {});
++      if (client) await client.close();
++      server.closeAllConnections();
++      await new Promise((resolve) => server.close(resolve));
++      await rm(home, { recursive: true, force: true });
++    }
++  },
++);
 diff --git a/codex-cli/tests/merge-turn.test.js b/codex-cli/tests/merge-turn.test.js
 new file mode 100644
 index 000000000..0959ff861
@@ -7126,6 +7872,289 @@ index 000000000..0959ff861
 +    },
 +  );
 +}
+diff --git a/codex-cli/tests/merge-ui.test.js b/codex-cli/tests/merge-ui.test.js
+new file mode 100644
+index 000000000..09527a1d1
+--- /dev/null
++++ b/codex-cli/tests/merge-ui.test.js
+@@ -0,0 +1,277 @@
++import assert from "node:assert/strict";
++import { spawn } from "node:child_process";
++import { createInterface } from "node:readline";
++import { readFile } from "node:fs/promises";
++import test from "node:test";
++import { fileURLToPath } from "node:url";
++import { exampleSources, fakeGraphClient } from "./fixtures/graph.js";
++import { parseGraphItem } from "../bin/merge-graph.js";
++import { JsonRpcClient } from "../bin/merge-rpc.js";
++
++const helper = fileURLToPath(new URL("../bin/merge-ui.js", import.meta.url));
++
++async function runBridge(
++  t,
++  args,
++  {
++    cancelAnalysis = false,
++    disconnect = false,
++    sources = exampleSources(),
++  } = {},
++) {
++  const { client } = await fakeGraphClient(t, sources);
++  const originals = await Promise.all(
++    [...client.threads.values()].map((thread) => readFile(thread.path)),
++  );
++  const child = spawn(process.execPath, [helper], {
++    env: client.env,
++    stdio: ["pipe", "pipe", "pipe"],
++  });
++  const lines = createInterface({ input: child.stdout });
++  const messages = [];
++  const ids = new Set();
++  let stderr = "";
++  let turn = 0;
++  child.stderr.on("data", (data) => {
++    stderr += data;
++  });
++  const send = (message) => {
++    if (!child.stdin.destroyed)
++      child.stdin.write(JSON.stringify(message) + "\n");
++  };
++  child.stdin.on("error", () => {});
++  const timer = setTimeout(() => child.kill("SIGKILL"), 10000);
++  t.after(() => {
++    clearTimeout(timer);
++    lines.close();
++    child.kill();
++  });
++  lines.on("line", async (line) => {
++    const message = JSON.parse(line);
++    messages.push(message);
++    if (message.type !== "rpc" || !message.message.method) return;
++    const request = message.message;
++    try {
++      assert.match(request.id, /^context-merge-[\da-f-]+-\d+$/);
++      assert.ok(
++        !ids.has(request.id),
++        "unique request IDs on the shared connection",
++      );
++      ids.add(request.id);
++      if (disconnect) return child.stdin.end();
++      let result;
++      if (request.method === "turn/start") {
++        const id = "turn-" + ++turn;
++        if (cancelAnalysis) {
++          send({ type: "cancel" });
++        } else {
++          const reading = await client.runTurn(request.params);
++          send({
++            type: "rpc",
++            message: {
++              method: "item/completed",
++              params: {
++                threadId: request.params.threadId,
++                turnId: id,
++                item: {
++                  type: "agentMessage",
++                  id: "reading-" + id,
++                  phase: "final_answer",
++                  text: reading.text,
++                },
++              },
++            },
++          });
++          send({
++            type: "rpc",
++            message: {
++              method: "turn/completed",
++              params: {
++                threadId: request.params.threadId,
++                turn: { id, status: "completed", items: [] },
++              },
++            },
++          });
++        }
++        result = { turn: { id, status: "inProgress" } };
++      } else if (request.method === "turn/interrupt") result = {};
++      else result = await client.request(request.method, request.params);
++      send({ type: "rpc", message: { id: request.id, result } });
++    } catch (error) {
++      send({
++        type: "rpc",
++        message: {
++          id: request.id,
++          error: { code: -32000, message: error.message },
++        },
++      });
++    }
++  });
++  send({ type: "start", primaryThreadId: "A", args, model: "fixture-reader" });
++  const exitCode = await new Promise((resolve, reject) => {
++    child.once("error", reject);
++    child.once("close", resolve);
++  });
++  assert.equal(stderr, "");
++  const after = await Promise.all(
++    sources.map((source) =>
++      readFile(client.threads.get(source.thread.id).path),
++    ),
++  );
++  assert.deepEqual(
++    after,
++    originals,
++    "merge must preserve the original branches",
++  );
++  return {
++    client,
++    messages,
++    exitCode,
++    result: messages.find((m) => m.type === "result")?.result,
++  };
++}
++
++test("TUI bridge merges short branches through the existing connection without inference", async (t) => {
++  const { client, result, exitCode } = await runBridge(t, [
++    "B",
++    "C",
++    "--name",
++    "Two views",
++  ]);
++  assert.equal(exitCode, 0);
++  assert.ok(result.threadId);
++  assert.equal(client.threads.get(result.threadId).name, "Two views");
++  assert.ok(
++    !client.calls.some((call) =>
++      ["model", "initialize", "thread/resume"].includes(call.method),
++    ),
++  );
++  const injection = client.calls.find(
++    (call) => call.method === "thread/inject_items",
++  );
++  const capsule = injection.params.items.map(parseGraphItem).find(Boolean);
++  assert.equal(capsule.branches.length, 2);
++  assert.equal(capsule.parents.length, 3);
++});
++
++test("TUI bridge forwards streamed analysis and preserves semantic graph context", async (t) => {
++  const { client, result, exitCode } = await runBridge(t, [
++    "B",
++    "C",
++    "--mode",
++    "summary",
++    "--semantic",
++  ]);
++  assert.equal(exitCode, 0);
++  assert.ok(result.threadId);
++  assert.equal(
++    client.calls.filter((call) => call.method === "model").length,
++    3,
++  );
++  assert.ok(
++    client.calls.some(
++      (call) =>
++        call.method === "thread/unsubscribe" &&
++        call.params.threadId.startsWith("analysis-"),
++    ),
++  );
++});
++
++test("TUI merge options without IDs request the branch picker", async (t) => {
++  const { client, result, exitCode } = await runBridge(t, [
++    "--semantic",
++    "--goal",
++    "Compare the views",
++  ]);
++  assert.equal(exitCode, 0);
++  assert.deepEqual(result, {
++    selectBranches: true,
++    args: ["--semantic", "--goal", "Compare the views"],
++  });
++  assert.equal(client.calls.length, 0);
++});
++
++test("TUI merge dry run performs no inference or thread creation", async (t) => {
++  const { client, result, exitCode } = await runBridge(t, [
++    "B",
++    "C",
++    "--mode",
++    "summary",
++    "--dry-run",
++  ]);
++  assert.equal(exitCode, 0);
++  assert.equal(result.dryRun, true);
++  assert.ok(
++    !client.calls.some((call) =>
++      ["model", "thread/start", "thread/fork", "thread/inject_items"].includes(
++        call.method,
++      ),
++    ),
++  );
++});
++
++test("TUI merge rejects duplicate primary and CLI-only flags before RPC", async (t) => {
++  for (const args of [
++    ["A", "B"],
++    ["B", "--resume"],
++    ["B", "--cd", "/tmp"],
++    ["B", "--config", "model=x"],
++  ]) {
++    const { client, messages, exitCode } = await runBridge(t, args);
++    assert.equal(exitCode, 1);
++    assert.ok(messages.some((m) => m.type === "error"));
++    assert.equal(client.calls.length, 0);
++  }
++});
++
++test("TUI merge cancellation interrupts analysis and creates no merged thread", async (t) => {
++  const { client, messages, exitCode, result } = await runBridge(
++    t,
++    ["B", "C", "--mode", "summary"],
++    { cancelAnalysis: true },
++  );
++  assert.equal(exitCode, 1);
++  assert.equal(result, undefined);
++  assert.match(messages.find((m) => m.type === "error").message, /cancelled/);
++  assert.ok(
++    !client.calls.some((call) =>
++      ["thread/fork", "thread/inject_items"].includes(call.method),
++    ),
++  );
++  assert.ok(client.calls.some((call) => call.method === "thread/unsubscribe"));
++  assert.ok(messages.some((m) => m.message?.method === "turn/interrupt"));
++});
++
++test("TUI helper exits promptly when its host connection disappears", async (t) => {
++  const { messages, exitCode } = await runBridge(t, ["B", "C"], {
++    disconnect: true,
++  });
++  assert.equal(exitCode, 1);
++  assert.ok(messages.some((m) => m.type === "error"));
++});
++
++test("shared RPC cancellation before a turn reply interrupts the eventual turn and releases listeners", async () => {
++  const abort = new AbortController();
++  const sent = [];
++  const client = new JsonRpcClient({
++    write: (message) => sent.push(message),
++    signal: abort.signal,
++    idPrefix: "merge-",
++  });
++  const analysis = client.runTurn({ threadId: "analysis" });
++  abort.abort();
++  await assert.rejects(analysis, /cancelled/);
++  assert.equal(client.notifications.size, 0);
++  client.receive(
++    JSON.stringify({
++      id: sent[0].id,
++      result: { turn: { id: "late", status: "inProgress" } },
++    }),
++  );
++  await new Promise((resolve) => setImmediate(resolve));
++  assert.equal(sent[1].method, "turn/interrupt");
++  assert.equal(sent[1].params.turnId, "late");
++  client.receive(JSON.stringify({ id: sent[1].id, result: {} }));
++  await assert.rejects(client.request("thread/fork", {}), /cancelled/);
++  assert.equal(client.pending.size, 0);
++});
 diff --git a/codex-cli/tests/merge.test.js b/codex-cli/tests/merge.test.js
 new file mode 100644
 index 000000000..426d58607
@@ -7724,12 +8753,855 @@ index 000000000..426d58607
 +    assert.throws(() => parseMergeArgs(args));
 +  assert.equal(parseMergeArgs(["--help"]).help, true);
 +});
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index 9d7d85cd0..302b27258 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -218,6 +218,7 @@ mod background_requests;
+ mod composer_hints;
+ mod config_persistence;
+ mod connector_mentions;
++mod conversation_merge;
+ mod daemon_menu;
+ mod daybreak;
+ mod empty_state_policy;
+diff --git a/codex-rs/tui/src/app/conversation_merge.rs b/codex-rs/tui/src/app/conversation_merge.rs
+new file mode 100644
+index 000000000..4d82dd81a
+--- /dev/null
++++ b/codex-rs/tui/src/app/conversation_merge.rs
+@@ -0,0 +1,488 @@
++//! Conversation graph merge for the interactive CLI.
++//!
++//! The Node helper shares the existing graph engine with `codex merge`. Its JSON-RPC requests
++//! use this TUI's app-server connection, preserving ownership of the current thread. Only
++//! helper-owned threads receive analysis notifications; other events retain normal TUI routing.
++
++use super::app_server_event_targets::ServerNotificationThreadTarget;
++use super::app_server_event_targets::server_notification_thread_target;
++use super::app_server_event_targets::server_request_thread_id;
++use super::*;
++use crate::bottom_pane::MultiSelectItem;
++use codex_app_server_client::AppServerEvent;
++use codex_app_server_client::AppServerRequestHandle;
++use codex_app_server_protocol::JSONRPCErrorError;
++use codex_app_server_protocol::RequestId;
++use color_eyre::eyre::eyre;
++use futures::StreamExt;
++use serde::Deserialize;
++use serde_json::Value;
++use serde_json::json;
++use std::process::Stdio;
++use tokio::io::AsyncBufReadExt;
++use tokio::io::AsyncWriteExt;
++use tokio::io::BufReader;
++use tokio::io::Lines;
++use tokio::process::Child;
++use tokio::process::ChildStdin;
++use tokio::process::ChildStdout;
++use tokio::process::Command;
++use tokio::task::JoinSet;
++
++#[derive(Deserialize)]
++#[serde(tag = "type", rename_all = "camelCase")]
++enum MergeMessage {
++    Rpc { message: Value },
++    Progress { text: String },
++    Result { result: Value },
++    Error { message: String },
++}
++
++struct MergeThread {
++    ephemeral: bool,
++    turn_id: Option<String>,
++}
++
++struct MergeRpc {
++    request: Value,
++    response: Value,
++}
++
++struct MergeBridge {
++    child: Child,
++    input: ChildStdin,
++    output: Lines<BufReader<ChildStdout>>,
++    requests: JoinSet<MergeRpc>,
++    threads: HashMap<ThreadId, MergeThread>,
++}
++
++impl MergeBridge {
++    fn start(config: &Config) -> Result<Self> {
++        let script = std::env::var_os("CODEX_CONTEXT_MERGE_SCRIPT")
++            .map(PathBuf::from)
++            .unwrap_or_else(|| {
++                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../codex-cli/bin/merge-ui.js")
++            });
++        if !script.is_file() {
++            color_eyre::eyre::bail!(
++                "/merge needs the context-graph launcher. Start this checkout with ./codex."
++            );
++        }
++        let node = std::env::var_os("CODEX_CONTEXT_MERGE_NODE").unwrap_or_else(|| "node".into());
++        let mut child = Command::new(node)
++            .arg(script)
++            .env("CODEX_HOME", config.codex_home.as_path())
++            .stdin(Stdio::piped())
++            .stdout(Stdio::piped())
++            .stderr(Stdio::null())
++            .kill_on_drop(true)
++            .spawn()
++            .wrap_err("Could not start /merge helper; Node.js 22 or newer is required")?;
++        let input = child
++            .stdin
++            .take()
++            .ok_or_else(|| eyre!("Missing merge input"))?;
++        let output = child
++            .stdout
++            .take()
++            .ok_or_else(|| eyre!("Missing merge output"))?;
++        Ok(Self {
++            child,
++            input,
++            output: BufReader::new(output).lines(),
++            requests: JoinSet::new(),
++            threads: HashMap::new(),
++        })
++    }
++
++    async fn send(&mut self, message: Value) -> Result<()> {
++        let mut bytes = serde_json::to_vec(&message)?;
++        bytes.push(b'\n');
++        self.input.write_all(&bytes).await?;
++        self.input.flush().await?;
++        Ok(())
++    }
++
++    fn request(&mut self, handle: AppServerRequestHandle, message: Value) {
++        self.requests.spawn(async move {
++            let id = message["id"].clone();
++            let response = match serde_json::from_value::<ClientRequest>(message.clone()) {
++                Ok(request) => match tokio::time::timeout(Duration::from_secs(35), handle.request(request)).await {
++                    Ok(Ok(Ok(result))) => json!({"id": id, "result": result}),
++                    Ok(Ok(Err(error))) => json!({"id": id, "error": error}),
++                    Ok(Err(error)) => json!({"id": id, "error": {"code": -32000, "message": error.to_string()}}),
++                    Err(_) => json!({"id": id, "error": {"code": -32000, "message": "Conversation merge request timed out"}}),
++                },
++                Err(error) => json!({"id": id, "error": {"code": -32602, "message": error.to_string()}}),
++            };
++            MergeRpc { request: message, response }
++        });
++    }
++
++    fn record_rpc(&mut self, rpc: &MergeRpc) {
++        match rpc.request["method"].as_str() {
++            Some("thread/start" | "thread/fork") => {
++                if let Some(id) = rpc.response["result"]["thread"]["id"]
++                    .as_str()
++                    .and_then(|id| ThreadId::from_string(id).ok())
++                {
++                    self.threads.insert(
++                        id,
++                        MergeThread {
++                            ephemeral: rpc.request["params"]["ephemeral"]
++                                .as_bool()
++                                .unwrap_or(false),
++                            turn_id: None,
++                        },
++                    );
++                }
++            }
++            Some("turn/start") => {
++                if let Some(thread) = rpc.request["params"]["threadId"]
++                    .as_str()
++                    .and_then(|id| ThreadId::from_string(id).ok())
++                    .and_then(|id| self.threads.get_mut(&id))
++                {
++                    thread.turn_id = rpc.response["result"]["turn"]["id"]
++                        .as_str()
++                        .map(str::to_owned);
++                }
++            }
++            _ => {}
++        }
++    }
++
++    // The helper normally unsubscribes/archives itself. Repeat cleanup on cancellation, a broken
++    // pipe, or a helper crash so hidden analyses cannot retain writers after returning to the chat.
++    async fn finish(&mut self, handle: AppServerRequestHandle, success: bool) {
++        let _ = self.child.kill().await;
++        let cleanup = async {
++            while let Some(rpc) = self.requests.join_next().await {
++                if let Ok(rpc) = rpc {
++                    self.record_rpc(&rpc);
++                }
++            }
++            for (id, thread) in &self.threads {
++                if let Some(turn_id) = &thread.turn_id {
++                    let request: ClientRequest = serde_json::from_value(json!({
++                        "id": format!("merge-cleanup-{}", Uuid::new_v4()),
++                        "method": "turn/interrupt",
++                        "params": {"threadId": id.to_string(), "turnId": turn_id},
++                    }))?;
++                    let _ = handle.request(request).await;
++                }
++                let method = if !success && !thread.ephemeral {
++                    "thread/archive"
++                } else {
++                    "thread/unsubscribe"
++                };
++                let request: ClientRequest = serde_json::from_value(json!({
++                    "id": format!("merge-cleanup-{}", Uuid::new_v4()),
++                    "method": method,
++                    "params": {"threadId": id.to_string()},
++                }))?;
++                let _ = handle.request(request).await;
++            }
++            Ok::<_, serde_json::Error>(())
++        };
++        if tokio::time::timeout(Duration::from_secs(10), cleanup)
++            .await
++            .is_err()
++        {
++            tracing::warn!("conversation merge cleanup timed out");
++        }
++    }
++}
++
++impl App {
++    pub(super) async fn merge_current_session(
++        &mut self,
++        tui: &mut tui::Tui,
++        app_server: &mut AppServerSession,
++        primary_thread_id: ThreadId,
++        args: Vec<String>,
++    ) -> Result<AppRunControl> {
++        if self.chat_widget.thread_id() != Some(primary_thread_id)
++            || self.chat_widget.is_user_turn_pending_or_running()
++            || self.chat_widget.is_external_writer_view()
++            || self
++                .pending_server_profiles
++                .contains_key(&primary_thread_id)
++        {
++            self.chat_widget.add_error_message(
++                "Wait for the current chat to be idle, then run /merge again.".into(),
++            );
++            return Ok(AppRunControl::Continue);
++        }
++        if app_server.uses_remote_workspace() {
++            self.chat_widget.add_error_message(
++                "/merge currently needs local saved chats. Start a local CLI session to merge them.".into(),
++            );
++            return Ok(AppRunControl::Continue);
++        }
++        if self.windows_sandbox_blocks_thread_switch()
++            || self.reject_pending_permission_root_switch()
++        {
++            return Ok(AppRunControl::Continue);
++        }
++        if args.is_empty() {
++            match merge_picker_items(app_server.request_handle(), primary_thread_id).await {
++                Ok(items) if !items.is_empty() => {
++                    self.chat_widget.show_conversation_merge_picker(
++                        primary_thread_id,
++                        items,
++                        Vec::new(),
++                    );
++                }
++                Ok(_) => self
++                    .chat_widget
++                    .add_info_message("No other saved, idle chats to merge.".into(), None),
++                Err(error) => self
++                    .chat_widget
++                    .add_error_message(format!("Could not list merge branches: {error:#}")),
++            }
++            return Ok(AppRunControl::Continue);
++        }
++        let mut bridge = match MergeBridge::start(&self.config) {
++            Ok(bridge) => bridge,
++            Err(error) => {
++                self.chat_widget.add_error_message(format!("{error:#}"));
++                return Ok(AppRunControl::Continue);
++            }
++        };
++        self.chat_widget
++            .set_conversation_merge_status(Some("Esc cancels.".into()));
++        let outcome = self
++            .run_conversation_merge(tui, app_server, &mut bridge, primary_thread_id, args)
++            .await;
++        self.chat_widget.set_conversation_merge_status(None);
++        bridge
++            .finish(app_server.request_handle(), matches!(&outcome, Ok(Some(_))))
++            .await;
++        match outcome {
++            Ok(Some(result)) => {
++                if let Some(help) = result["help"].as_str() {
++                    self.chat_widget.add_info_message(help.into(), None);
++                } else if result["selectBranches"].as_bool() == Some(true) {
++                    let args = serde_json::from_value::<Vec<String>>(result["args"].clone())?;
++                    match merge_picker_items(app_server.request_handle(), primary_thread_id).await {
++                        Ok(items) if !items.is_empty() => self
++                            .chat_widget
++                            .show_conversation_merge_picker(primary_thread_id, items, args),
++                        Ok(_) => self
++                            .chat_widget
++                            .add_info_message("No other saved, idle chats to merge.".into(), None),
++                        Err(error) => self
++                            .chat_widget
++                            .add_error_message(format!("Could not list merge branches: {error:#}")),
++                    }
++                } else if result["dryRun"].as_bool() == Some(true) {
++                    self.chat_widget.add_info_message(
++                        format!("Merge preview:\n{}", serde_json::to_string_pretty(&result)?),
++                        None,
++                    );
++                } else if let Some(thread_id) = result["threadId"].as_str() {
++                    let target = crate::lookup_session_target_with_app_server(
++                        app_server,
++                        &self.config,
++                        thread_id,
++                    )
++                    .await;
++                    if let Ok(Some(target)) = target {
++                        let target_id = target.thread_id;
++                        let control = self.resume_target_session(tui, app_server, target).await?;
++                        if self.chat_widget.thread_id() == Some(target_id) {
++                            self.chat_widget.add_info_message(
++                                "Branches merged. You can continue here.".into(),
++                                None,
++                            );
++                        } else {
++                            self.chat_widget.add_info_message(
++                                format!("Merge saved as {thread_id}. Use /resume {thread_id} to open it."), None,
++                            );
++                        }
++                        return Ok(control);
++                    }
++                    self.chat_widget.add_error_message(format!("Merge saved as {thread_id}, but could not open it. Use /resume {thread_id}."));
++                }
++            }
++            Ok(None) => self
++                .chat_widget
++                .add_info_message("Conversation merge cancelled.".into(), None),
++            Err(error) => self
++                .chat_widget
++                .add_error_message(format!("Conversation merge failed: {error:#}")),
++        }
++        tui.frame_requester().schedule_frame();
++        Ok(AppRunControl::Continue)
++    }
++
++    async fn run_conversation_merge(
++        &mut self,
++        tui: &mut tui::Tui,
++        app_server: &mut AppServerSession,
++        bridge: &mut MergeBridge,
++        primary_thread_id: ThreadId,
++        args: Vec<String>,
++    ) -> Result<Option<Value>> {
++        bridge
++            .send(json!({
++                "type": "start", "primaryThreadId": primary_thread_id.to_string(),
++                "args": args, "model": self.chat_widget.current_model(),
++            }))
++            .await?;
++        let mut events = tui.event_stream();
++        let mut cancelled = false;
++        let mut cancel_deadline = None;
++        tui.frame_requester().schedule_frame();
++        loop {
++            tokio::select! {
++                line = bridge.output.next_line() => {
++                    let line = line?.ok_or_else(|| eyre!("Conversation merge helper exited unexpectedly"))?;
++                    match serde_json::from_str::<MergeMessage>(&line)? {
++                        MergeMessage::Rpc { message } if message.get("method").is_some() => {
++                            bridge.request(app_server.request_handle(), message);
++                        }
++                        MergeMessage::Rpc { message } => {
++                            let id: RequestId = serde_json::from_value(message["id"].clone())?;
++                            let error: JSONRPCErrorError = serde_json::from_value(message["error"].clone())?;
++                            app_server.reject_server_request(id, error).await?;
++                        }
++                        MergeMessage::Progress { text } => {
++                            if !cancelled {
++                                self.chat_widget.set_conversation_merge_status(Some(text));
++                            }
++                        }
++                        MergeMessage::Result { result } => return Ok((!cancelled).then_some(result)),
++                        MergeMessage::Error { .. } if cancelled => return Ok(None),
++                        MergeMessage::Error { message } => color_eyre::eyre::bail!(message),
++                    }
++                }
++                rpc = bridge.requests.join_next(), if !bridge.requests.is_empty() => {
++                    if let Some(rpc) = rpc {
++                        let rpc = rpc?;
++                        bridge.record_rpc(&rpc);
++                        bridge.send(json!({"type": "rpc", "message": rpc.response})).await?;
++                    }
++                }
++                event = app_server.next_event() => {
++                    let event = event.ok_or_else(|| eyre!("App-server connection closed during merge"))?;
++                    let helper_event;
++                    match &event {
++                        AppServerEvent::ServerNotification(notification) => {
++                            helper_event = matches!(
++                                server_notification_thread_target(notification.as_ref()),
++                                ServerNotificationThreadTarget::Thread(id) if bridge.threads.contains_key(&id)
++                            );
++                            bridge.send(json!({"type": "rpc", "message": notification})).await?;
++                        }
++                        AppServerEvent::ServerRequest(request) => {
++                            helper_event = server_request_thread_id(request.as_ref())
++                                .is_some_and(|id| bridge.threads.contains_key(&id));
++                            if helper_event {
++                                bridge.send(json!({"type": "rpc", "message": request})).await?;
++                            }
++                        }
++                        AppServerEvent::Disconnected { message } => color_eyre::eyre::bail!(message.clone()),
++                        AppServerEvent::Lagged { .. } => color_eyre::eyre::bail!("App-server events were lost during merge; try again."),
++                    }
++                    if !helper_event {
++                        self.handle_app_server_event(app_server, event).await;
++                    }
++                }
++                event = events.next() => {
++                    match event {
++                        Some(TuiEvent::Key(key)) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
++                            && (key.code == KeyCode::Esc || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))) => {
++                            if !cancelled {
++                                cancelled = true;
++                                cancel_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(10));
++                                bridge.send(json!({"type": "cancel"})).await?;
++                                self.chat_widget.set_conversation_merge_status(Some("Cancelling conversation merge…".into()));
++                            }
++                        }
++                        Some(event @ (TuiEvent::Draw | TuiEvent::Resize(_) | TuiEvent::Resume | TuiEvent::FocusGained)) => {
++                            let size = tui.screen_size_for_event(&event)?;
++                            self.handle_draw_pre_render(tui, size)?;
++                            self.chat_widget.pre_draw_tick();
++                            self.render_chat_widget_frame(tui, size)?;
++                        }
++                        None => return Ok(None),
++                        _ => {}
++                    }
++                }
++                _ = async {
++                    if let Some(deadline) = cancel_deadline {
++                        tokio::time::sleep_until(deadline).await;
++                    } else {
++                        std::future::pending::<()>().await;
++                    }
++                } => return Ok(None),
++            }
++        }
++    }
++}
++
++async fn merge_picker_items(
++    handle: AppServerRequestHandle,
++    primary_thread_id: ThreadId,
++) -> Result<Vec<MultiSelectItem>> {
++    let mut items = Vec::new();
++    let mut cursor = Value::Null;
++    let mut seen_cursors = HashSet::new();
++    loop {
++        let request: ClientRequest = serde_json::from_value(json!({
++            "id": format!("merge-picker-{}", Uuid::new_v4()),
++            "method": "thread/list",
++            "params": {
++                "limit": 100, "cursor": cursor, "sortKey": "updated_at", "modelProviders": [],
++            },
++        }))?;
++        let response = handle
++            .request(request)
++            .await?
++            .map_err(|error| eyre!(error.message))?;
++        for thread in response["data"]
++            .as_array()
++            .ok_or_else(|| eyre!("Invalid thread list"))?
++        {
++            let Some(id) = thread["id"].as_str() else {
++                continue;
++            };
++            if id == primary_thread_id.to_string()
++                || thread["ephemeral"].as_bool() == Some(true)
++                || matches!(
++                    thread["status"]["type"].as_str(),
++                    Some("active" | "systemError")
++                )
++                || thread["path"].as_str().is_none()
++            {
++                continue;
++            }
++            let name = thread["name"]
++                .as_str()
++                .filter(|name| !name.is_empty())
++                .or_else(|| {
++                    thread["preview"]
++                        .as_str()
++                        .filter(|preview| !preview.is_empty())
++                })
++                .unwrap_or(id)
++                .replace(['\n', '\r'], " ");
++            items.push(MultiSelectItem {
++                id: id.into(),
++                name,
++                description: Some(format!("{id} · {}", thread["cwd"].as_str().unwrap_or(""))),
++                orderable: false,
++                ..Default::default()
++            });
++        }
++        cursor = response["nextCursor"].clone();
++        if cursor.is_null() {
++            return Ok(items);
++        }
++        if !seen_cursors.insert(cursor.to_string()) {
++            color_eyre::eyre::bail!("Repeated conversation list cursor");
++        }
++    }
++}
+diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
+index 659e67a6e..f6e27a34a 100644
+--- a/codex-rs/tui/src/app/event_dispatch.rs
++++ b/codex-rs/tui/src/app/event_dispatch.rs
+@@ -106,6 +106,7 @@ impl App {
+                     | AppEvent::SelectAgentThread(_)
+                     | AppEvent::StartSide { .. }
+                     | AppEvent::ForkCurrentSession { .. }
++                    | AppEvent::MergeCurrentSession { .. }
+                     | AppEvent::StartManagedWorktree {
+                         mode: crate::app_event::ManagedWorktreeMode::Fork,
+                         ..
+@@ -515,6 +516,14 @@ impl App {
+                     Err(err) => return Err(err),
+                 }
+             }
++            AppEvent::MergeCurrentSession {
++                primary_thread_id,
++                args,
++            } => {
++                return self
++                    .merge_current_session(tui, app_server, primary_thread_id, args)
++                    .await;
++            }
+             AppEvent::ArchiveCurrentThread => {
+                 return self.archive_current_thread(tui, app_server).await;
+             }
+diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
+index 7a388a223..121155c25 100644
+--- a/codex-rs/tui/src/app_event.rs
++++ b/codex-rs/tui/src/app_event.rs
+@@ -646,6 +646,12 @@ pub(crate) enum AppEvent {
+         name: Option<String>,
+     },
+
++    /// Merge saved branches into the captured current thread. Empty args open a picker.
++    MergeCurrentSession {
++        primary_thread_id: ThreadId,
++        args: Vec<String>,
++    },
++
+     /// Revert before a selected prompt, retaining its identity across queued history pages.
+     RevertSessionForPromptEdit {
+         thread_id: ThreadId,
+diff --git a/codex-rs/tui/src/chatwidget/slash_dispatch.rs b/codex-rs/tui/src/chatwidget/slash_dispatch.rs
+index 182a696b2..3bdc76c1a 100644
+--- a/codex-rs/tui/src/chatwidget/slash_dispatch.rs
++++ b/codex-rs/tui/src/chatwidget/slash_dispatch.rs
+@@ -9,6 +9,8 @@ use super::*;
+ use crate::app::WindowsSandboxHost;
+ use crate::app_event::ManagedWorktreeMode;
+ use crate::app_event::ThreadGoalSetMode;
++use crate::bottom_pane::MultiSelectItem;
++use crate::bottom_pane::MultiSelectPicker;
+ use crate::bottom_pane::prompt_args::parse_slash_name;
+ use crate::bottom_pane::slash_commands::BuiltinCommandFlags;
+ use crate::bottom_pane::slash_commands::ServiceTierCommand;
+@@ -145,9 +147,11 @@ impl ChatWidget {
+                 || (self.bottom_pane.is_task_running()
+                     && (self.mcp_startup_status.is_none()
+                         || self.input_queue.user_turn_pending_start))))
+-            || (matches!(cmd, SlashCommand::Resume | SlashCommand::Cd)
+-                && (self.input_queue.user_turn_pending_start
+-                    || self.turn_lifecycle.agent_turn_running))
++            || (matches!(
++                cmd,
++                SlashCommand::Resume | SlashCommand::Cd | SlashCommand::Merge
++            ) && (self.input_queue.user_turn_pending_start
++                || self.turn_lifecycle.agent_turn_running))
+             || (cmd == SlashCommand::Export && self.input_queue.suppress_queue_autosend)
+             || (cmd == SlashCommand::Review
+                 && source == SlashCommandDispatchSource::Live
+@@ -312,6 +316,7 @@ impl ChatWidget {
+             SlashCommand::Fork => {
+                 self.show_session_checkout_picker(ManagedWorktreeMode::Fork, /*name*/ None);
+             }
++            SlashCommand::Merge => self.request_conversation_merge(Vec::new()),
+             SlashCommand::Worktree => {
+                 self.show_managed_worktree_picker();
+             }
+@@ -1095,6 +1100,10 @@ impl ChatWidget {
+                 self.app_event_tx
+                     .send(AppEvent::ResumeSessionByIdOrName(args));
+             }
++            SlashCommand::Merge if !trimmed.is_empty() => match shlex::split(trimmed) {
++                Some(args) => self.request_conversation_merge(args),
++                None => self.add_error_message("Unclosed quote in /merge arguments.".into()),
++            },
+             SlashCommand::Pets
+                 if matches!(
+                     args.trim().to_ascii_lowercase().as_str(),
+@@ -1308,6 +1317,7 @@ impl ChatWidget {
+             | SlashCommand::Clear
+             | SlashCommand::Resume
+             | SlashCommand::Fork
++            | SlashCommand::Merge
+             | SlashCommand::Init
+             | SlashCommand::Compact
+             | SlashCommand::Review
+@@ -1339,6 +1349,62 @@ impl ChatWidget {
+         }
+     }
+
++    fn request_conversation_merge(&mut self, args: Vec<String>) {
++        if self.blocks_direct_input || self.is_external_writer_view() {
++            self.add_error_message("Run /merge from a writable main chat.".into());
++            return;
++        }
++        let Some(primary_thread_id) = self.thread_id else {
++            self.add_error_message(
++                "Session is still starting; try /merge again in a moment.".into(),
++            );
++            return;
++        };
++        self.app_event_tx.send(AppEvent::MergeCurrentSession {
++            primary_thread_id,
++            args,
++        });
++    }
++
++    pub(crate) fn show_conversation_merge_picker(
++        &mut self,
++        primary_thread_id: ThreadId,
++        items: Vec<MultiSelectItem>,
++        args: Vec<String>,
++    ) {
++        let picker = MultiSelectPicker::builder(
++            "Merge branches into this chat".into(),
++            Some("Type to search. Space selects branches; Enter merges; Esc cancels.".into()),
++            self.app_event_tx.clone(),
++        )
++        .list_keymap(self.bottom_pane.list_keymap())
++        .items(items)
++        .require_selection()
++        .on_confirm(move |ids, tx| {
++            tx.send(AppEvent::MergeCurrentSession {
++                primary_thread_id,
++                args: args.iter().cloned().chain(ids.iter().cloned()).collect(),
++            });
++        })
++        .build();
++        self.bottom_pane.show_view(Box::new(picker));
++        self.request_redraw();
++    }
++
++    pub(crate) fn set_conversation_merge_status(&mut self, text: Option<String>) {
++        self.bottom_pane.set_task_running(text.is_some());
++        if let Some(text) = text {
++            self.bottom_pane.ensure_status_indicator();
++            self.set_status(
++                "Merging conversations".into(),
++                Some(text),
++                StatusDetailsCapitalization::Preserve,
++                STATUS_DETAILS_DEFAULT_MAX_LINES,
++            );
++        }
++        self.request_redraw();
++    }
++
+     fn slash_command_args_elements(
+         rest: &str,
+         rest_offset: usize,
+diff --git a/codex-rs/tui/src/chatwidget/tests/slash_commands.rs b/codex-rs/tui/src/chatwidget/tests/slash_commands.rs
+index 558b04432..1a21eb294 100644
+--- a/codex-rs/tui/src/chatwidget/tests/slash_commands.rs
++++ b/codex-rs/tui/src/chatwidget/tests/slash_commands.rs
+@@ -4,6 +4,118 @@ use crate::bottom_pane::slash_commands::ServiceTierCommand;
+ use pretty_assertions::assert_eq;
+ use serial_test::serial;
+
++#[tokio::test]
++async fn slash_merge_captures_primary_and_parses_quoted_inline_options() {
++    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
++    let primary = ThreadId::new();
++    chat.thread_id = Some(primary);
++    chat.dispatch_command(SlashCommand::Merge);
++    assert_matches!(rx.try_recv(), Ok(AppEvent::MergeCurrentSession { primary_thread_id, args })
++        if primary_thread_id == primary && args.is_empty());
++    chat.dispatch_command_with_args(
++        SlashCommand::Merge,
++        r#"branch-b branch-c --semantic --goal "compare two views""#.into(),
++        Vec::new(),
++    );
++    assert_matches!(rx.try_recv(), Ok(AppEvent::MergeCurrentSession { primary_thread_id, args })
++        if primary_thread_id == primary && args == ["branch-b", "branch-c", "--semantic", "--goal", "compare two views"]);
++    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
++}
++
++#[tokio::test]
++async fn slash_merge_rejects_unavailable_threads_and_unclosed_quotes() {
++    for state in ["starting", "running", "pending", "side", "owned", "quote"] {
++        let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
++        chat.thread_id = (state != "starting").then(ThreadId::new);
++        match state {
++            "running" => chat.bottom_pane.set_task_running(true),
++            "pending" => chat.input_queue.user_turn_pending_start = true,
++            "side" => chat.set_side_conversation_active(true),
++            "owned" => chat.set_parent_owned_thread(),
++            _ => {}
++        }
++        chat.dispatch_command_with_args(
++            SlashCommand::Merge,
++            if state == "quote" {
++                "branch --name \"open"
++            } else {
++                "branch"
++            }
++            .into(),
++            Vec::new(),
++        );
++        let cells = drain_insert_history(&mut rx);
++        assert!(!cells.is_empty(), "missing rejection for {state}");
++        assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
++        assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
++    }
++}
++
++#[tokio::test]
++async fn slash_merge_picker_selects_multiple_branches_and_preserves_options() {
++    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
++    let primary = ThreadId::new();
++    chat.thread_id = Some(primary);
++    let items = ["branch-b", "branch-c"]
++        .into_iter()
++        .map(|id| crate::bottom_pane::MultiSelectItem {
++            id: id.into(),
++            name: id.into(),
++            ..Default::default()
++        })
++        .collect();
++    chat.show_conversation_merge_picker(primary, items, vec!["--semantic".into()]);
++    for code in [
++        KeyCode::Char(' '),
++        KeyCode::Down,
++        KeyCode::Char(' '),
++        KeyCode::Enter,
++    ] {
++        chat.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE));
++    }
++    let mut selection = None;
++    while let Ok(event) = rx.try_recv() {
++        if let AppEvent::MergeCurrentSession {
++            primary_thread_id,
++            args,
++        } = event
++        {
++            assert_eq!(primary_thread_id, primary);
++            selection = Some(args);
++        }
++    }
++    assert_eq!(
++        selection,
++        Some(vec![
++            "--semantic".into(),
++            "branch-b".into(),
++            "branch-c".into()
++        ])
++    );
++}
++
++#[tokio::test]
++async fn slash_merge_picker_cancel_does_not_dispatch_merge() {
++    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
++    let primary = ThreadId::new();
++    chat.thread_id = Some(primary);
++    chat.show_conversation_merge_picker(
++        primary,
++        vec![crate::bottom_pane::MultiSelectItem {
++            id: "branch".into(),
++            name: "branch".into(),
++            ..Default::default()
++        }],
++        Vec::new(),
++    );
++    chat.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
++    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
++    assert!(chat.bottom_pane.no_modal_or_popup_active());
++    while let Ok(event) = rx.try_recv() {
++        assert!(!matches!(event, AppEvent::MergeCurrentSession { .. }));
++    }
++}
++
+ fn force_pet_image_support(chat: &mut ChatWidget) {
+     chat.set_pet_image_support_for_tests(crate::pets::PetImageSupport::Supported(
+         crate::pets::ImageProtocol::Kitty,
+diff --git a/codex-rs/tui/src/slash_command.rs b/codex-rs/tui/src/slash_command.rs
+index d9ba053eb..8e93696c9 100644
+--- a/codex-rs/tui/src/slash_command.rs
++++ b/codex-rs/tui/src/slash_command.rs
+@@ -34,6 +34,7 @@ pub enum SlashCommand {
+     Delete,
+     Resume,
+     Fork,
++    Merge,
+     Worktree,
+     App,
+     Init,
+@@ -102,6 +103,7 @@ impl SlashCommand {
+             SlashCommand::Delete => "permanently delete this session",
+             SlashCommand::Clear => "clear the terminal and start a new chat",
+             SlashCommand::Fork => "fork the current chat",
++            SlashCommand::Merge => "merge saved branches into this chat",
+             SlashCommand::Worktree => "start or continue a conversation in a new worktree",
+             SlashCommand::App => "continue this session in the Desktop app",
+             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
+@@ -173,6 +175,7 @@ impl SlashCommand {
+                 | SlashCommand::New
+                 | SlashCommand::Clear
+                 | SlashCommand::Fork
++                | SlashCommand::Merge
+                 | SlashCommand::Plan
+                 | SlashCommand::Goal
+                 | SlashCommand::Voice
+@@ -243,6 +246,7 @@ impl SlashCommand {
+             SlashCommand::New
+             | SlashCommand::Delete
+             | SlashCommand::Fork
++            | SlashCommand::Merge
+             | SlashCommand::Worktree
+             | SlashCommand::Init
+             | SlashCommand::Compact
+@@ -330,6 +334,15 @@ mod tests {
+
+     use super::SlashCommand;
+
++    #[test]
++    fn merge_requires_an_idle_writable_main_thread_and_accepts_args() {
++        assert_eq!(SlashCommand::from_str("merge"), Ok(SlashCommand::Merge));
++        assert!(SlashCommand::Merge.supports_inline_args());
++        assert!(!SlashCommand::Merge.available_during_task());
++        assert!(!SlashCommand::Merge.available_when_thread_unavailable());
++        assert!(!SlashCommand::Merge.available_in_side_conversation());
++    }
++
+     #[test]
+     fn stop_command_is_canonical_name() {
+         assert_eq!(SlashCommand::Stop.command(), "stop");
 diff --git a/docs/context_merge.md b/docs/context_merge.md
 new file mode 100644
-index 000000000..547b29cc6
+index 000000000..d8e124a5b
 --- /dev/null
 +++ b/docs/context_merge.md
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,308 @@
 +# Conversation graph merge
 +
 +`codex merge A_ID B_ID C_ID` combines conversation context into a new resumable
@@ -7752,6 +9624,38 @@ index 000000000..547b29cc6
 +selects the modified npm launcher. This implementation uses existing app-server
 +APIs; native `thread/merge`, Desktop buttons, and Git working-tree merges are
 +outside its current interface.
++
++## Interactive CLI
++
++After building this branch's native CLI, start `./codex` and enter `/merge`.
++The current chat is the primary. Search saved chats, select branches with Space,
++and confirm with Enter; Esc closes the picker. Success opens the new merged chat
++through the existing resume flow.
++
++```text
++/merge B_ID C_ID
++/merge --semantic
++/merge B_ID C_ID --mode summary --semantic --goal "Compare the candidates"
++/merge B_ID C_ID --dry-run
++/merge --help
++```
++
++Options without branch IDs open the picker and carry those options into the
++merge. The engine, graph evidence, context planning, and modes are shared with the
++external command. Esc or Ctrl+C during analysis cancels it and keeps the current
++chat. Failures also keep the current chat. Sources must be local, saved, and idle,
++and the primary must be writable. The slash command inherits the current
++connection and analysis model; `--resume`, `--cd`, `--config`, and `--json` are
++external-command options.
++
++The native TUI routes a Node helper's namespaced JSON-RPC over its own app-server
++connection, so it does not acquire a second writer for the current conversation.
++Hidden analysis streams are delivered to the helper, while other server events
++retain normal TUI routing. Cancellation and helper failures interrupt and release
++helper-owned threads. Node must be available alongside the native CLI; the npm
++launcher supplies the helper path and Node executable.
++
++Build and launcher instructions are in [context_merge_checkout.md](context_merge_checkout.md).
 +
 +## The stored graph and the model's context
 +
@@ -8001,12 +9905,17 @@ index 000000000..547b29cc6
 +Responses fixtures check native persistence and protocol behavior; a separate
 +real-model example checks one generic writing discussion. See [validation](../VALIDATION.md)
 +and [checkout instructions](context_merge_checkout.md).
++
++`CODEX_TUI_MERGE_TEST_BINARY` separately enables the Unix terminal integration
++test for this branch's compiled `/merge` implementation. It requires Python 3
++and checks the picker, help, previews, automatic switching, model-visible branch
++content, semantic reading, cancellation, and unchanged source context.
 diff --git a/docs/context_merge_checkout.md b/docs/context_merge_checkout.md
 new file mode 100644
-index 000000000..61a3421e8
+index 000000000..f8396bf23
 --- /dev/null
 +++ b/docs/context_merge_checkout.md
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,151 @@
 +# 在此分支使用上下文图 merge
 +
 +当前功能在 `huanyuqu/codex` 的 `context-graph` 分支。`origin` 指向你的 fork，
@@ -8019,6 +9928,27 @@ index 000000000..61a3421e8
 +./codex merge A_ID B_ID C_ID --dry-run
 +./codex merge A_ID B_ID C_ID --name "合并讨论" --resume
 +```
++
++也可以在 `./codex` 的聊天界面中直接输入：
++
++```text
++/merge
++```
++
++菜单中输入文字搜索会话，空格选中 B、C，Enter 合并，Esc 取消。当前聊天
++自动作为 A；成功后自动切换到合并后的新聊天，继续输入即可。A、B、C 的
++原始上下文仍然保留。也支持直接指定分支 UUID：
++
++```text
++/merge B_ID C_ID
++/merge B_ID C_ID --dry-run
++/merge B_ID C_ID --semantic --goal "比较两种观点，保留分歧"
++```
++
++`/merge --semantic` 和 `/merge --mode reference` 会先打开同一个分支选择器，
++再用这些选项合并。执行中的 Esc 或 Ctrl+C 取消合并；取消或失败时留在
++当前聊天。当前会话需要空闲、可写，分支需要已保存；当前版本支持本地会话。
++斜杠命令不需要 `--resume`，也不接受 `--cd`、`--config`、`--json`。
 +
 +例如 A 为 `A1 → A2 → A3`，B 为 `A1 → B2`，C 为 `A1 → A2 → C3`。
 +合并后，存档仍记住 `B2` 的父节点是 `A1`、`C3` 的父节点是 `A2`，
@@ -8066,12 +9996,26 @@ index 000000000..61a3421e8
 +
 +## 运行与开发
 +
-+当前机器的 `./codex` 已连接官方 Codex 0.162.0 原生二进制。修改位于 npm
-+CLI 层，使用现有 app-server API，无需编译 Rust。此功能目前通过 CLI 和
-+JavaScript 接口提供；Desktop 中尚无 merge 按钮，也未新增原生 `thread/merge`。
++交互式 `/merge` 需要编译此分支的 Rust CLI。当前机器已具备 Rust 编译环境；
++构建完成后，`./codex` 自动使用 `codex-rs/target/debug/codex` 和本地 Node
++合并模块。全局安装的官方 `codex` 不会自动获得 `/merge`。
++本地 debug 构建没有完整 daemon 安装包，因此 launcher 默认使用进程内
++app-server，无需手动加 `--no-daemon`。
++
++```sh
++cd codex-rs
++cargo build --locked -p codex-cli --bin codex
++cd ..
++./codex
++```
++
++可以用 `CODEX_CONTEXT_GRAPH_BINARY=/absolute/path/to/codex ./codex --no-daemon`
++选择其它本地构建产物。Rust TUI 将合并模块的请求交给当前 app-server 连接，成功后
++通过原生 resume 流程切换聊天；没有新增 `thread/merge` RPC 或 Desktop 按钮。
 +
 +新 clone 需要 Node.js 22 或更新版本，以及与当前平台对应的原生 Codex 包。
-+例如 macOS Apple Silicon 可安装已验证的版本：
++仅使用外部 `./codex merge ...` 命令时，无需编译 Rust。例如 macOS Apple
++Silicon 可安装已验证的版本：
 +
 +```sh
 +npm install --prefix codex-cli --no-save --package-lock=false \
@@ -8087,6 +10031,17 @@ index 000000000..61a3421e8
 +```sh
 +CODEX_MERGE_TEST_BINARY=/usr/local/bin/codex \
 +  node --test --test-reporter=spec codex-cli/tests/*.test.js
++```
++
++同时运行原生 `/merge` 终端测试时，指定此分支的构建产物（Unix 及 Python 3）：
++
++```sh
++CODEX_MERGE_TEST_BINARY="$PWD/codex-rs/target/debug/codex" \
++CODEX_TUI_MERGE_TEST_BINARY="$PWD/codex-rs/target/debug/codex" \
++  node --test --test-reporter=spec codex-cli/tests/*.test.js
++
++cd codex-rs
++cargo test --locked -p codex-tui --lib slash_command
 +```
 +
 +验证范围、真实模型案例及限制见 [VALIDATION.md](../VALIDATION.md)，详细
