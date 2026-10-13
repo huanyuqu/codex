@@ -3,6 +3,7 @@
 //! graph.
 
 use codex_history::RolloutItem;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use serde::Serialize;
 
@@ -14,6 +15,7 @@ use crate::ContextGraph;
 use crate::GraphError;
 use crate::MessageClassifier;
 use crate::Segmenter;
+use crate::segmenter::SealedBlock;
 
 /// Counts of what a [`GraphRecorder`] did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -33,6 +35,26 @@ pub enum GraphChange {
     BranchUpdated(BranchId),
 }
 
+/// A block a [`GraphRecorder`] sealed, with the items it was cut from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservedBlock {
+    pub block: Block,
+    pub outcome: AppendOutcome,
+    pub items: Vec<ResponseItem>,
+    /// Working directory of the turn that produced the block, for resolving relative paths.
+    pub cwd: Option<String>,
+}
+
+/// What a [`GraphRecorder`] saw, for consumers that index block content.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecorderEvent {
+    Block(ObservedBlock),
+    /// A turn ended, and every block it produced has been sealed.
+    TurnEnded {
+        turn_id: Option<String>,
+    },
+}
+
 /// Applies one thread's rollout items to its branch of a context graph.
 ///
 /// Compaction keeps the original blocks: its replacement history only adds the summary, and
@@ -44,6 +66,8 @@ pub struct GraphRecorder<C> {
     segmenter: Segmenter<C>,
     next_ordinal: u64,
     stats: ReplayStats,
+    events: Option<Vec<RecorderEvent>>,
+    cwd: Option<String>,
 }
 
 impl<C: MessageClassifier> GraphRecorder<C> {
@@ -54,7 +78,21 @@ impl<C: MessageClassifier> GraphRecorder<C> {
             segmenter: Segmenter::new(classifier),
             next_ordinal: 0,
             stats: ReplayStats::default(),
+            events: None,
+            cwd: None,
         }
+    }
+
+    /// Also keeps a [`RecorderEvent`] for every sealed block and turn end, to be drained with
+    /// [`GraphRecorder::take_events`].
+    pub fn with_events(mut self) -> Self {
+        self.events = Some(Vec::new());
+        self
+    }
+
+    /// Returns the events kept since the last call. Empty unless built [`Self::with_events`].
+    pub fn take_events(&mut self) -> Vec<RecorderEvent> {
+        self.events.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     pub fn branch(&self) -> &BranchId {
@@ -96,9 +134,22 @@ impl<C: MessageClassifier> GraphRecorder<C> {
                     changes.push(GraphChange::BranchUpdated(self.branch.clone()));
                 }
             }
-            RolloutItem::EventMsg(EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) => {
+            RolloutItem::TurnContext(context) => {
+                self.cwd = Some(context.cwd.to_string_lossy().into_owned());
+            }
+            RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
                 let blocks = self.segmenter.flush();
                 self.record(graph, blocks, &mut changes)?;
+                self.push_event(RecorderEvent::TurnEnded {
+                    turn_id: Some(event.turn_id.clone()),
+                });
+            }
+            RolloutItem::EventMsg(EventMsg::TurnAborted(event)) => {
+                let blocks = self.segmenter.flush();
+                self.record(graph, blocks, &mut changes)?;
+                self.push_event(RecorderEvent::TurnEnded {
+                    turn_id: event.turn_id.clone(),
+                });
             }
             _ => {}
         }
@@ -113,16 +164,32 @@ impl<C: MessageClassifier> GraphRecorder<C> {
         Ok(changes)
     }
 
+    fn push_event(&mut self, event: RecorderEvent) {
+        if let Some(events) = &mut self.events {
+            events.push(event);
+        }
+    }
+
     fn record(
         &mut self,
         graph: &mut ContextGraph,
-        blocks: Vec<Block>,
+        blocks: Vec<SealedBlock>,
         changes: &mut Vec<GraphChange>,
     ) -> Result<(), GraphError> {
         let mut moved = false;
-        for block in blocks {
+        for SealedBlock { block, items } in blocks {
             let id = block.id.clone();
-            match graph.append(&self.branch, block)? {
+            let observed = self.events.is_some().then(|| block.clone());
+            let outcome = graph.append(&self.branch, block)?;
+            if let Some(block) = observed {
+                self.push_event(RecorderEvent::Block(ObservedBlock {
+                    block,
+                    outcome,
+                    items,
+                    cwd: self.cwd.clone(),
+                }));
+            }
+            match outcome {
                 AppendOutcome::Added => {
                     self.stats.blocks_added += 1;
                     changes.push(GraphChange::BlockAdded(id));

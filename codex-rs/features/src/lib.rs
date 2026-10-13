@@ -97,6 +97,8 @@ pub enum Feature {
     AnalyticsPlanHistory,
     /// Record each thread's context graph of blocks and branches. Does not change model input.
     ContextGraph,
+    /// Describe recorded context graph blocks with a small model. Requires `context_graph`.
+    ContextGraphIndexing,
     /// Discover model catalogs for OpenAI API-key authentication.
     ApiKeyModelDiscovery,
     /// Forward explicit programs with builtin OpenAI API keys.
@@ -1905,6 +1907,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ContextGraph,
         key: "context_graph",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::ContextGraphIndexing,
+        key: "context_graph_indexing",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

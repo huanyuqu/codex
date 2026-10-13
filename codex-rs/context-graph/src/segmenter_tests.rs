@@ -17,9 +17,13 @@ fn feed(segmenter: &mut Segmenter<DefaultClassifier>, items: &[ResponseItem]) ->
     let mut blocks = Vec::new();
     for (ordinal, item) in items.iter().enumerate() {
         let ordinal = u64::try_from(ordinal).unwrap_or(u64::MAX);
-        blocks.extend(segmenter.push(ordinal, item));
+        blocks.extend(unwrap(segmenter.push(ordinal, item)));
     }
     blocks
+}
+
+fn unwrap(sealed: Vec<SealedBlock>) -> Vec<Block> {
+    sealed.into_iter().map(|sealed| sealed.block).collect()
 }
 
 fn summary(blocks: &[Block]) -> Vec<(String, BlockKind, Vec<String>, bool)> {
@@ -88,7 +92,7 @@ fn parallel_calls_release_in_open_order() {
     );
     assert_eq!(blocks, Vec::new());
 
-    let blocks = segmenter.push(4, &output("fco_1", "call_a"));
+    let blocks = unwrap(segmenter.push(4, &output("fco_1", "call_a")));
     assert_eq!(
         summary(&blocks),
         vec![
@@ -119,7 +123,7 @@ fn user_message_waits_behind_an_open_call() {
     );
     assert_eq!(blocks, Vec::new());
 
-    let blocks = segmenter.push(2, &output("fco_1", "call_a"));
+    let blocks = unwrap(segmenter.push(2, &output("fco_1", "call_a")));
     let ids: Vec<String> = blocks.iter().map(|block| block.id.to_string()).collect();
     assert_eq!(ids, vec!["blk_fc_1".to_string(), "blk_msg_u2".to_string()]);
 }
@@ -139,7 +143,7 @@ fn flush_marks_unanswered_and_orphaned_tool_items_incomplete() {
         &mut segmenter,
         &[output("fco_9", "call_missing"), call("fc_1", "call_a")],
     );
-    blocks.extend(segmenter.flush());
+    blocks.extend(unwrap(segmenter.flush()));
     assert_eq!(
         summary(&blocks),
         vec![
@@ -189,7 +193,7 @@ fn classifier_decides_message_kinds() {
     }
 
     let mut segmenter = Segmenter::new(Summaries);
-    let blocks = segmenter.push(0, &user("msg_s", "SUMMARY of earlier work"));
+    let blocks = unwrap(segmenter.push(0, &user("msg_s", "SUMMARY of earlier work")));
     assert_eq!(blocks[0].kind, BlockKind::Compaction);
 }
 
@@ -260,4 +264,20 @@ fn default_classifier_falls_back_to_legacy_markers() {
             BlockKind::UserMessage,
         ]
     );
+}
+
+#[test]
+fn sealed_blocks_carry_their_items() {
+    let mut segmenter = Segmenter::new(DefaultClassifier);
+    let items = vec![
+        reasoning("rs_1"),
+        call("fc_1", "call_a"),
+        output("fco_1", "call_a"),
+    ];
+    let mut sealed = Vec::new();
+    for (ordinal, item) in (0u64..).zip(&items) {
+        sealed.extend(segmenter.push(ordinal, item));
+    }
+    assert_eq!(sealed.len(), 1);
+    assert_eq!(sealed[0].items, items);
 }

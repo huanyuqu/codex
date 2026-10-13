@@ -11,6 +11,7 @@ use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadRolledBackEvent;
+use codex_protocol::protocol::TurnCompleteEvent;
 
 fn id(value: &str) -> Option<ResponseItemId> {
     Some(ResponseItemId::from_server(value.to_string()))
@@ -75,6 +76,70 @@ pub(crate) fn output(item_id: &str, call_id: &str) -> ResponseItem {
         output: FunctionCallOutputPayload::from_text("ok".to_string()),
         internal_chat_message_metadata_passthrough: None,
     }
+}
+
+/// An `exec_command` call with the given JSON arguments.
+pub(crate) fn exec(item_id: &str, call_id: &str, arguments: &str) -> ResponseItem {
+    ResponseItem::FunctionCall {
+        encrypted_content: None,
+        status: None,
+        id: id(item_id),
+        name: "exec_command".to_string(),
+        namespace: None,
+        arguments: arguments.to_string(),
+        encrypted_function_args: None,
+        call_id: call_id.to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+/// A function call output with the given text.
+pub(crate) fn output_text(item_id: &str, call_id: &str, text: &str) -> ResponseItem {
+    ResponseItem::FunctionCallOutput {
+        id: id(item_id),
+        call_id: Some(call_id.to_string()),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload::from_text(text.to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+/// A freeform tool call, such as `apply_patch` or a code mode `exec` script.
+pub(crate) fn custom_call(item_id: &str, call_id: &str, name: &str, input: &str) -> ResponseItem {
+    ResponseItem::CustomToolCall {
+        encrypted_content: None,
+        id: id(item_id),
+        status: None,
+        call_id: call_id.to_string(),
+        name: name.to_string(),
+        namespace: None,
+        input: input.to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+pub(crate) fn custom_output(item_id: &str, call_id: &str, text: &str) -> ResponseItem {
+    ResponseItem::CustomToolCallOutput {
+        id: id(item_id),
+        call_id: call_id.to_string(),
+        name: None,
+        output: FunctionCallOutputPayload::from_text(text.to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+pub(crate) fn turn_complete(turn_id: &str) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+        root_turn_id: None,
+        turn_id: turn_id.to_string(),
+        last_agent_message: None,
+        error: None,
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
+        time_to_first_token_ms: None,
+    }))
 }
 
 pub(crate) fn rollout(item: ResponseItem) -> RolloutItem {

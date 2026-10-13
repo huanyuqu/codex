@@ -2931,10 +2931,35 @@ dependencies = [
  "codex-history",
  "codex-protocol",
  "pretty_assertions",
+ "regex-lite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "shlex",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "codex-context-graph-eval"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "codex-context-graph",
+ "codex-context-graph-store",
+ "codex-rollout",
+ "codex-state",
+ "codex-utils-absolute-path",
+ "futures",
+ "pretty_assertions",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 0.9.11+spec-1.1.0",
+ "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]
@@ -2947,9 +2972,11 @@ dependencies = [
  "codex-history",
  "codex-protocol",
  "codex-rollout",
+ "codex-secrets",
  "codex-state",
  "codex-thread-store",
  "codex-utils-absolute-path",
+ "futures",
  "pretty_assertions",
  "serde",
  "serde_json",
@@ -2987,6 +3014,7 @@ dependencies = [
  "codex-config",
  "codex-connectors",
  "codex-context-fragments",
+ "codex-context-graph",
  "codex-context-graph-store",
  "codex-core-plugins",
  "codex-diagnostics",

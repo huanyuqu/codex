@@ -42,6 +42,7 @@ members = [
     "config-schema",
     "context-fragments",
     "context-graph",
+    "context-graph-eval",
     "context-graph-store",
     "shell-command",
     "skills",
@@ -214,6 +215,7 @@ codex-agent-message-board-extension = { path = "ext/agent-message-board" }
 codex-connectors-extension = { path = "ext/connectors" }
 codex-context-fragments = { path = "context-fragments" }
 codex-context-graph = { path = "context-graph" }
+codex-context-graph-eval = { path = "context-graph-eval" }
 codex-context-graph-store = { path = "context-graph-store" }
 codex-core = { path = "core" }
 codex-core-api = { path = "core-api" }

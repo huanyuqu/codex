@@ -6,6 +6,11 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::Mutex;
 
 use anyhow::Context as _;
 use codex_context_graph::Block;
@@ -23,9 +28,19 @@ use sqlx::Row;
 use sqlx::SqliteConnection;
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
+use tokio::sync::OnceCell;
 
+mod cards;
+mod indexer;
 mod live;
 
+pub use cards::IndexRequest;
+pub use cards::IndexUsage;
+pub use indexer::CardCompletion;
+pub use indexer::CardModel;
+pub use indexer::IndexerConfig;
+pub use indexer::ShadowIndexer;
+pub use live::LiveIndexing;
 pub use live::install_live_recorder;
 
 pub const CONTEXT_GRAPH_DB_FILENAME: &str = "context_graph_1.sqlite";
@@ -38,10 +53,26 @@ pub struct LocalContextGraphStore {
     pool: SqlitePool,
 }
 
+/// Stores opened by this process, by database path. Sessions share one pool per database, and
+/// a new database is migrated once rather than by every session that opens it concurrently.
+static OPENED: LazyLock<Mutex<HashMap<PathBuf, Arc<OnceCell<LocalContextGraphStore>>>>> =
+    LazyLock::new(Mutex::default);
+
 impl LocalContextGraphStore {
     pub async fn open(sqlite: &SqliteConfig) -> anyhow::Result<Self> {
         let path = sqlite.home().join(CONTEXT_GRAPH_DB_FILENAME);
-        let pool = sqlite.open_read_write_pool(&path).await?;
+        let cell = match OPENED.lock() {
+            Ok(mut opened) => Arc::clone(opened.entry(path.to_path_buf()).or_default()),
+            Err(_) => Arc::new(OnceCell::new()),
+        };
+        let store = cell
+            .get_or_try_init(|| Self::open_and_migrate(sqlite, &path))
+            .await?;
+        Ok(store.clone())
+    }
+
+    async fn open_and_migrate(sqlite: &SqliteConfig, path: &Path) -> anyhow::Result<Self> {
+        let pool = sqlite.open_read_write_pool(path).await?;
         // Tolerate a database that a newer binary already migrated further.
         let migrator = Migrator {
             migrations: Cow::Borrowed(MIGRATOR.migrations.as_ref()),
@@ -60,7 +91,7 @@ impl LocalContextGraphStore {
 
     /// Replaces everything stored for `graph_id` with `graph`.
     pub async fn replace_graph(&self, graph_id: &str, graph: &ContextGraph) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("DELETE FROM cg_edges WHERE graph_id = ?")
             .bind(graph_id)
             .execute(&mut *tx)
@@ -87,7 +118,7 @@ impl LocalContextGraphStore {
     ///
     /// Blocks that are already stored, such as a prefix shared with another branch, are kept.
     pub async fn append_block(&self, graph_id: &str, node: &BlockNode) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let next_seq = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(seq) + 1, 0) FROM cg_blocks WHERE graph_id = ?",
         )

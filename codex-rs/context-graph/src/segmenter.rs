@@ -138,12 +138,21 @@ struct KeyedItem {
     ordinal: u64,
     turn_id: Option<String>,
     bytes: u64,
+    item: ResponseItem,
+}
+
+/// A block released by the [`Segmenter`], with the items it was cut from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SealedBlock {
+    pub block: Block,
+    pub items: Vec<ResponseItem>,
 }
 
 #[derive(Debug)]
 struct PendingBlock {
     kind: BlockKind,
     item_keys: Vec<String>,
+    items: Vec<ResponseItem>,
     turn_id: Option<String>,
     first_ordinal: u64,
     last_ordinal: u64,
@@ -157,6 +166,7 @@ impl PendingBlock {
         Self {
             kind,
             item_keys: vec![item.key],
+            items: vec![item.item],
             turn_id: item.turn_id,
             first_ordinal: item.ordinal,
             last_ordinal: item.ordinal,
@@ -168,6 +178,7 @@ impl PendingBlock {
 
     fn extend(&mut self, item: KeyedItem) {
         self.item_keys.push(item.key);
+        self.items.push(item.item);
         if self.turn_id.is_none() {
             self.turn_id = item.turn_id;
         }
@@ -175,9 +186,9 @@ impl PendingBlock {
         self.approx_bytes = self.approx_bytes.saturating_add(item.bytes);
     }
 
-    fn seal(self) -> Block {
+    fn seal(self) -> SealedBlock {
         let first_key = self.item_keys.first().map_or("", String::as_str);
-        Block {
+        let block = Block {
             id: BlockId::for_item_key(first_key),
             kind: self.kind,
             item_keys: self.item_keys,
@@ -186,6 +197,10 @@ impl PendingBlock {
             last_ordinal: self.last_ordinal,
             approx_bytes: self.approx_bytes,
             complete: self.complete,
+        };
+        SealedBlock {
+            block,
+            items: self.items,
         }
     }
 }
@@ -213,7 +228,7 @@ impl<C: MessageClassifier> Segmenter<C> {
     }
 
     /// Feeds one item and returns the blocks it released, in order.
-    pub fn push(&mut self, ordinal: u64, item: &ResponseItem) -> Vec<Block> {
+    pub fn push(&mut self, ordinal: u64, item: &ResponseItem) -> Vec<SealedBlock> {
         let role = self.role(item);
         if matches!(role, ItemRole::Ignored) {
             return Vec::new();
@@ -282,7 +297,7 @@ impl<C: MessageClassifier> Segmenter<C> {
     /// Seals everything still open, for example at the end of a turn.
     ///
     /// Tool calls that never received output are sealed as incomplete.
-    pub fn flush(&mut self) -> Vec<Block> {
+    pub fn flush(&mut self) -> Vec<SealedBlock> {
         if let Some(reasoning) = self.reasoning.take() {
             self.open.push_back(reasoning);
         }
@@ -299,7 +314,7 @@ impl<C: MessageClassifier> Segmenter<C> {
         self.reasoning.is_some() || !self.open.is_empty()
     }
 
-    fn release(&mut self) -> Vec<Block> {
+    fn release(&mut self) -> Vec<SealedBlock> {
         let mut released = Vec::new();
         while self
             .open
@@ -374,6 +389,7 @@ impl<C: MessageClassifier> Segmenter<C> {
             ordinal,
             turn_id: item.turn_id().map(str::to_owned),
             bytes: u64::try_from(serialized.len()).unwrap_or(u64::MAX),
+            item: item.clone(),
         }
     }
 }

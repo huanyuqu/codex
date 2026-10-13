@@ -9,9 +9,10 @@ use codex_context_graph::Branch;
 use codex_context_graph::BranchId;
 use codex_context_graph::ContextGraph;
 use codex_context_graph::DefaultClassifier;
+use codex_context_graph::IndexUpdate;
 use codex_context_graph::ReplayStats;
+use codex_context_graph::index_rollout;
 use codex_context_graph::render;
-use codex_context_graph::replay_rollout;
 use codex_context_graph_store::LocalContextGraphStore;
 use codex_rollout::RolloutRecorder;
 use codex_state::SqliteConfig;
@@ -36,11 +37,13 @@ struct Args {
     sqlite_home: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Format {
     Summary,
     Json,
     Mermaid,
+    /// Extracted block and turn cards as JSON lines.
+    Cards,
 }
 
 #[tokio::main]
@@ -64,7 +67,18 @@ async fn main() -> anyhow::Result<()> {
         let mut branch = Branch::new(branch_id.clone(), thread.clone());
         branch.thread_id = Some(thread.clone());
         graph.add_branch(branch)?;
-        let stats = replay_rollout(&mut graph, &branch_id, &items, DefaultClassifier)?;
+        let print_cards = args.format == Format::Cards;
+        let stats = index_rollout(
+            &mut graph,
+            &branch_id,
+            &items,
+            DefaultClassifier,
+            |update| {
+                if print_cards {
+                    print_card(&update);
+                }
+            },
+        )?;
         replays.push((thread, stats, parse_errors));
     }
     graph.validate()?;
@@ -73,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
         Format::Summary => print_summary(&graph, &replays),
         Format::Json => println!("{}", serde_json::to_string_pretty(&graph.export())?),
         Format::Mermaid => print!("{}", render::branch_mermaid(&graph)),
+        Format::Cards => {}
     }
 
     if let Some(graph_id) = args.save {
@@ -95,6 +110,23 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("stored and verified graph {graph_id}");
     }
     Ok(())
+}
+
+fn print_card(update: &IndexUpdate) {
+    let line = match update {
+        IndexUpdate::Block { card, .. } => serde_json::to_string(&serde_json::json!({
+            "type": "block",
+            "card": card,
+        })),
+        IndexUpdate::TurnEnded { card: Some(card) } => serde_json::to_string(&serde_json::json!({
+            "type": "turn",
+            "card": card,
+        })),
+        IndexUpdate::TurnEnded { card: None } => return,
+    };
+    if let Ok(line) = line {
+        println!("{line}");
+    }
 }
 
 fn print_summary(graph: &ContextGraph, replays: &[(String, ReplayStats, usize)]) {

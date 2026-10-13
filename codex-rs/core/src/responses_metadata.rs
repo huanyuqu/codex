@@ -169,6 +169,8 @@ pub(crate) enum CodexResponsesRequestKind {
     Prewarm,
     Compaction(CompactionTurnMetadata),
     Memory,
+    /// Indexing of the session's context graph.
+    ContextIndex,
 }
 
 impl CodexResponsesRequestKind {
@@ -178,6 +180,7 @@ impl CodexResponsesRequestKind {
             CodexResponsesRequestKind::Prewarm => ("prewarm", None),
             CodexResponsesRequestKind::Compaction(metadata) => ("compaction", Some(metadata)),
             CodexResponsesRequestKind::Memory => ("memory", None),
+            CodexResponsesRequestKind::ContextIndex => ("context_index", None),
         }
     }
 

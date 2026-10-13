@@ -132,7 +132,8 @@ async fn live_recording_matches_a_replay_of_the_same_items() {
         &live,
         "graph-1",
         &initial,
-        sqlite.clone()
+        sqlite.clone(),
+        None
     ));
 
     let appended = vec![
@@ -169,6 +170,60 @@ async fn a_second_recorder_is_not_installed() {
     let live = live_thread(&dir).await;
     let sqlite = sqlite_config(&dir);
 
-    assert!(install_live_recorder(&live, "graph-1", &[], sqlite.clone()));
-    assert!(!install_live_recorder(&live, "graph-2", &[], sqlite));
+    assert!(install_live_recorder(
+        &live,
+        "graph-1",
+        &[],
+        sqlite.clone(),
+        None
+    ));
+    assert!(!install_live_recorder(&live, "graph-2", &[], sqlite, None));
+}
+
+#[tokio::test]
+async fn live_indexing_writes_extracted_cards() {
+    let dir = TempDir::new().unwrap_or_else(|err| panic!("temp dir: {err}"));
+    let live = live_thread(&dir).await;
+    let sqlite = sqlite_config(&dir);
+
+    let initial = vec![message("msg_u1", "user", "add retries")];
+    assert!(install_live_recorder(
+        &live,
+        "graph-1",
+        &initial,
+        sqlite.clone(),
+        Some(LiveIndexing::default()),
+    ));
+    live.append_items(&[
+        call("fc_1", "call_1"),
+        output("fco_1", "call_1"),
+        message("msg_a1", "assistant", "retries added"),
+    ])
+    .await
+    .unwrap_or_else(|err| panic!("append: {err}"));
+
+    let store = LocalContextGraphStore::open(&sqlite)
+        .await
+        .unwrap_or_else(|err| panic!("open store: {err}"));
+    let expected = vec![
+        ("blk_msg_u1".to_string(), "add retries".to_string()),
+        ("blk_fc_1".to_string(), "exec_command".to_string()),
+        ("blk_msg_a1".to_string(), "retries added".to_string()),
+    ];
+    // Cards are ordered by the blocks the graph writer stores on its own task.
+    let mut titles = Vec::new();
+    for _ in 0..200 {
+        titles = store
+            .load_cards("graph-1")
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|card| (card.block_id.to_string(), card.title))
+            .collect::<Vec<_>>();
+        if titles == expected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(titles, expected);
 }

@@ -877,6 +877,9 @@
             "context_graph": {
               "type": "boolean"
             },
+            "context_graph_indexing": {
+              "type": "boolean"
+            },
             "context_management": {
               "$ref": "#/definitions/FeatureToml_for_ContextManagementConfigToml"
             },
@@ -7209,6 +7212,9 @@
           "type": "boolean"
         },
         "context_graph": {
+          "type": "boolean"
+        },
+        "context_graph_indexing": {
           "type": "boolean"
         },
         "context_management": {

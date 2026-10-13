@@ -9,13 +9,20 @@
 //! are shared with its source. This crate is pure logic and performs no IO.
 
 mod block;
+pub mod card;
+pub mod card_prompt;
+pub mod extract;
 mod graph;
 mod ids;
+mod index;
+pub mod links;
 pub mod render;
 mod replay;
 mod segmenter;
 #[cfg(test)]
 mod test_support;
+pub mod text;
+pub mod turn;
 
 pub use block::Block;
 pub use block::BlockKind;
@@ -29,11 +36,17 @@ pub use graph::GraphError;
 pub use graph::GraphExport;
 pub use ids::BlockId;
 pub use ids::BranchId;
+pub use index::BlockIndexer;
+pub use index::IndexUpdate;
+pub use index::index_rollout;
 pub use replay::GraphChange;
 pub use replay::GraphRecorder;
+pub use replay::ObservedBlock;
+pub use replay::RecorderEvent;
 pub use replay::ReplayStats;
 pub use replay::replay_rollout;
 pub use segmenter::DefaultClassifier;
 pub use segmenter::MessageClass;
 pub use segmenter::MessageClassifier;
+pub use segmenter::SealedBlock;
 pub use segmenter::Segmenter;
