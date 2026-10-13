@@ -731,6 +731,42 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadUnarchiveResponse,
     },
+    #[experimental("contextGraph/read")]
+    ContextGraphRead => "contextGraph/read" {
+        params: v2::ContextGraphReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ContextGraphReadResponse,
+    },
+    #[experimental("contextGraph/merge")]
+    ContextGraphMerge => "contextGraph/merge" {
+        params: v2::ContextGraphMergeParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ContextGraphMergeResponse,
+    },
+    #[experimental("contextGraph/branch/rename")]
+    ContextGraphBranchRename => "contextGraph/branch/rename" {
+        params: v2::ContextGraphBranchRenameParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ContextGraphBranchRenameResponse,
+    },
+    #[experimental("contextGraph/branch/preview")]
+    ContextGraphBranchPreview => "contextGraph/branch/preview" {
+        params: v2::ContextGraphBranchPreviewParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ContextGraphBranchPreviewResponse,
+    },
+    #[experimental("contextGraph/mode/set")]
+    ContextGraphModeSet => "contextGraph/mode/set" {
+        params: v2::ContextGraphModeSetParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ContextGraphModeSetResponse,
+    },
+    #[experimental("contextGraph/views/read")]
+    ContextGraphViewsRead => "contextGraph/views/read" {
+        params: v2::ContextGraphViewsReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ContextGraphViewsReadResponse,
+    },
     ThreadCompactStart => "thread/compact/start" {
         params: v2::ThreadCompactStartParams,
         serialization: thread_id(params.thread_id),
@@ -1959,6 +1995,8 @@ server_notification_definitions! {
     ThreadReverted => "thread/reverted" (v2::ThreadRevertedNotification),
     SkillsChanged => "skills/changed" (v2::SkillsChangedNotification),
     ThreadNameUpdated => "thread/name/updated" (v2::ThreadNameUpdatedNotification),
+    #[experimental("contextGraph/updated")]
+    ContextGraphUpdated => "contextGraph/updated" (v2::ContextGraphUpdatedNotification),
     ThreadAttachmentUpdated => "thread/attachment/updated" (v2::ThreadAttachmentUpdatedNotification),
     ThreadGoalUpdated => "thread/goal/updated" (v2::ThreadGoalUpdatedNotification),
     #[experimental("thread/prediction/updated")]

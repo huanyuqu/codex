@@ -119,6 +119,13 @@ export type { ConsumeAccountRateLimitResetCreditOutcome } from "./ConsumeAccount
 export type { ConsumeAccountRateLimitResetCreditParams } from "./ConsumeAccountRateLimitResetCreditParams";
 export type { ConsumeAccountRateLimitResetCreditResponse } from "./ConsumeAccountRateLimitResetCreditResponse";
 export type { ContextCompactedNotification } from "./ContextCompactedNotification";
+export type { ContextGraphBranch } from "./ContextGraphBranch";
+export type { ContextGraphBranchStatus } from "./ContextGraphBranchStatus";
+export type { ContextGraphMerge } from "./ContextGraphMerge";
+export type { ContextGraphMergeMode } from "./ContextGraphMergeMode";
+export type { ContextGraphMode } from "./ContextGraphMode";
+export type { ContextGraphUpdatedNotification } from "./ContextGraphUpdatedNotification";
+export type { ContextGraphView } from "./ContextGraphView";
 export type { CreditsSnapshot } from "./CreditsSnapshot";
 export type { CyberAccessProgram } from "./CyberAccessProgram";
 export type { DeprecationNoticeNotification } from "./DeprecationNoticeNotification";

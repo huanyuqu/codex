@@ -767,6 +767,63 @@
         }
       ]
     },
+    "ContextGraphMergeMode": {
+      "oneOf": [
+        {
+          "description": "A summary of the branch's work enters the target thread's history.",
+          "enum": [
+            "fold"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The branch's history becomes part of what the target thread's recall chooses from.",
+          "enum": [
+            "reference"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A model writes a merge note from the branch's history.",
+          "enum": [
+            "synthesize"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The branch's history is copied into the target thread's.",
+          "enum": [
+            "inline"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ContextGraphMode": {
+      "oneOf": [
+        {
+          "description": "The whole history, compacted into a summary when the context window fills up.",
+          "enum": [
+            "full"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The whole history until it fills the soft limit, then a recalled history.",
+          "enum": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A recalled history for every turn.",
+          "enum": [
+            "recall"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "ConversationTextRole": {
       "enum": [
         "user",

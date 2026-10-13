@@ -1124,6 +1124,22 @@
       ],
       "type": "object"
     },
+    "ContextGraphUpdatedNotification": {
+      "properties": {
+        "graphId": {
+          "type": "string"
+        },
+        "threadId": {
+          "description": "The thread whose graph changed, such as by a merge or a rename.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "graphId",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "CreditsSnapshot": {
       "properties": {
         "balance": {
@@ -7316,6 +7332,26 @@
         "params"
       ],
       "title": "Thread/name/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "contextGraph/updated"
+          ],
+          "title": "ContextGraph/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ContextGraphUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "ContextGraph/updatedNotification",
       "type": "object"
     },
     {

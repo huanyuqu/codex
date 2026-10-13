@@ -4847,6 +4847,26 @@
           "properties": {
             "method": {
               "enum": [
+                "contextGraph/updated"
+              ],
+              "title": "ContextGraph/updatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ContextGraphUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "ContextGraph/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "thread/attachment/updated"
               ],
               "title": "Thread/attachment/updatedNotificationMethod",
@@ -10796,6 +10816,228 @@
           "turnId"
         ],
         "title": "ContextCompactedNotification",
+        "type": "object"
+      },
+      "ContextGraphBranch": {
+        "properties": {
+          "branchId": {
+            "type": "string"
+          },
+          "current": {
+            "description": "Whether this is the branch of the thread the graph was read for.",
+            "type": "boolean"
+          },
+          "depth": {
+            "description": "How many forks lie between the branch and its root.",
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "lastRequest": {
+            "description": "Title of the branch's latest request.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "parentBranchId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/definitions/v2/ContextGraphBranchStatus"
+          },
+          "summary": {
+            "default": null,
+            "description": "What the branch is about, once the shadow agent has described it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "threadId": {
+            "description": "The thread that runs the branch; null for history no thread runs.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "turns": {
+            "description": "User turns the branch added after it was forked.",
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "branchId",
+          "current",
+          "depth",
+          "name",
+          "status",
+          "turns"
+        ],
+        "type": "object"
+      },
+      "ContextGraphBranchStatus": {
+        "oneOf": [
+          {
+            "enum": [
+              "active",
+              "merged",
+              "archived"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "History removed from a thread by rollback.",
+            "enum": [
+              "rolledBack"
+            ],
+            "type": "string"
+          }
+        ]
+      },
+      "ContextGraphMerge": {
+        "properties": {
+          "mode": {
+            "$ref": "#/definitions/v2/ContextGraphMergeMode"
+          },
+          "sourceBranchId": {
+            "type": "string"
+          },
+          "targetBranchId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "sourceBranchId",
+          "targetBranchId"
+        ],
+        "type": "object"
+      },
+      "ContextGraphMergeMode": {
+        "oneOf": [
+          {
+            "description": "A summary of the branch's work enters the target thread's history.",
+            "enum": [
+              "fold"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "The branch's history becomes part of what the target thread's recall chooses from.",
+            "enum": [
+              "reference"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "A model writes a merge note from the branch's history.",
+            "enum": [
+              "synthesize"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "The branch's history is copied into the target thread's.",
+            "enum": [
+              "inline"
+            ],
+            "type": "string"
+          }
+        ]
+      },
+      "ContextGraphMode": {
+        "oneOf": [
+          {
+            "description": "The whole history, compacted into a summary when the context window fills up.",
+            "enum": [
+              "full"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "The whole history until it fills the soft limit, then a recalled history.",
+            "enum": [
+              "auto"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "A recalled history for every turn.",
+            "enum": [
+              "recall"
+            ],
+            "type": "string"
+          }
+        ]
+      },
+      "ContextGraphUpdatedNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "graphId": {
+            "type": "string"
+          },
+          "threadId": {
+            "description": "The thread whose graph changed, such as by a merge or a rename.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "graphId",
+          "threadId"
+        ],
+        "title": "ContextGraphUpdatedNotification",
+        "type": "object"
+      },
+      "ContextGraphView": {
+        "properties": {
+          "blocks": {
+            "description": "Blocks the view shows.",
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "budgetTokens": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "latencyMs": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "question": {
+            "description": "The request recall chose context for.",
+            "type": "string"
+          },
+          "selector": {
+            "description": "The model that screened the history.",
+            "type": "string"
+          },
+          "tokens": {
+            "description": "Estimated tokens of the view.",
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "blocks",
+          "budgetTokens",
+          "latencyMs",
+          "question",
+          "selector",
+          "tokens"
+        ],
         "type": "object"
       },
       "ConversationTextRole": {

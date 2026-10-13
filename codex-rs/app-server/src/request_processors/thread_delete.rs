@@ -63,6 +63,12 @@ impl ThreadRequestProcessor {
     }
 
     async fn send_thread_deleted_notifications(&self, deleted_thread_ids: Vec<String>) {
+        // The context graph index holds data derived from the deleted threads; it goes too.
+        Box::pin(forget_context_graphs(
+            &self.config.sqlite,
+            &deleted_thread_ids,
+        ))
+        .await;
         for thread_id in deleted_thread_ids {
             self.outgoing
                 .send_server_notification(ServerNotification::ThreadDeleted(
@@ -149,5 +155,19 @@ fn thread_store_delete_error(err: ThreadStoreError) -> JSONRPCErrorError {
             unsupported_thread_store_operation(operation)
         }
         err => internal_error(format!("failed to delete thread: {err}")),
+    }
+}
+
+/// Deletes what the context graph index derived from `thread_ids`.
+async fn forget_context_graphs(sqlite: &codex_state::SqliteConfig, thread_ids: &[String]) {
+    match codex_context_graph_store::LocalContextGraphStore::open(sqlite).await {
+        Ok(store) => {
+            for thread_id in thread_ids {
+                if let Err(err) = store.delete_thread(thread_id).await {
+                    tracing::warn!("failed to delete the context graph of {thread_id}: {err:#}");
+                }
+            }
+        }
+        Err(err) => tracing::warn!("context graph unavailable for deletion: {err:#}"),
     }
 }

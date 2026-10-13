@@ -1723,3 +1723,6 @@ fn xcode_26_4_mcp_elicitations_auto_deny(
     client_name == Some("Xcode")
         && client_version.is_some_and(|version| version.starts_with("26.4"))
 }
+
+#[path = "context_graph_processor.rs"]
+mod context_graph;

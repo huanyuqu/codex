@@ -1288,16 +1288,15 @@ impl MessageProcessor {
                 .await
                 .map(|response| Some(response.into())),
             ClientRequest::ThreadStart { params, .. } => {
-                self.thread_processor
-                    .thread_start(
-                        request_id.clone(),
-                        params,
-                        app_server_client_name.clone(),
-                        client_version.clone(),
-                        client_mcp_extensions.clone(),
-                        request_context,
-                    )
-                    .await
+                Box::pin(self.thread_processor.thread_start(
+                    request_id.clone(),
+                    params,
+                    app_server_client_name.clone(),
+                    client_version.clone(),
+                    client_mcp_extensions.clone(),
+                    request_context,
+                ))
+                .await
             }
             ClientRequest::ThreadUnsubscribe { params, .. } => {
                 let thread_id = params.thread_id.clone();
@@ -1311,26 +1310,24 @@ impl MessageProcessor {
                 Ok(response)
             }
             ClientRequest::ThreadResume { params, .. } => {
-                self.thread_processor
-                    .thread_resume(
-                        ThreadResumeTarget::Client(request_id.clone()),
-                        params,
-                        app_server_client_name.clone(),
-                        client_version.clone(),
-                        client_mcp_extensions.clone(),
-                    )
-                    .await
+                Box::pin(self.thread_processor.thread_resume(
+                    ThreadResumeTarget::Client(request_id.clone()),
+                    params,
+                    app_server_client_name.clone(),
+                    client_version.clone(),
+                    client_mcp_extensions.clone(),
+                ))
+                .await
             }
             ClientRequest::ThreadFork { params, .. } => {
-                self.thread_processor
-                    .thread_fork(
-                        request_id.clone(),
-                        params,
-                        app_server_client_name.clone(),
-                        client_version.clone(),
-                        client_mcp_extensions.clone(),
-                    )
-                    .await
+                Box::pin(self.thread_processor.thread_fork(
+                    request_id.clone(),
+                    params,
+                    app_server_client_name.clone(),
+                    client_version.clone(),
+                    client_mcp_extensions.clone(),
+                ))
+                .await
             }
             ClientRequest::ThreadArchive { params, .. } => {
                 self.thread_processor
@@ -1661,6 +1658,25 @@ impl MessageProcessor {
                 self.turn_processor
                     .thread_inject_items(&request_id, params)
                     .await
+            }
+            // Boxed so the graph handlers do not grow this dispatcher's future.
+            ClientRequest::ContextGraphRead { params, .. } => {
+                Box::pin(self.turn_processor.context_graph_read(params)).await
+            }
+            ClientRequest::ContextGraphMerge { params, .. } => {
+                Box::pin(self.turn_processor.context_graph_merge(&request_id, params)).await
+            }
+            ClientRequest::ContextGraphBranchRename { params, .. } => {
+                Box::pin(self.turn_processor.context_graph_branch_rename(params)).await
+            }
+            ClientRequest::ContextGraphBranchPreview { params, .. } => {
+                Box::pin(self.turn_processor.context_graph_branch_preview(params)).await
+            }
+            ClientRequest::ContextGraphModeSet { params, .. } => {
+                Box::pin(self.turn_processor.context_graph_mode_set(params)).await
+            }
+            ClientRequest::ContextGraphViewsRead { params, .. } => {
+                Box::pin(self.turn_processor.context_graph_views_read(params)).await
             }
             ClientRequest::TurnSteer { params, .. } => {
                 self.turn_processor.turn_steer(&request_id, params).await
