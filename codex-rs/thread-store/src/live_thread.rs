@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -42,6 +43,16 @@ pub struct LiveThread {
     thread_store: Arc<dyn ThreadStore>,
     metadata_sync: Arc<Mutex<ThreadMetadataSync>>,
     persistence_telemetry: RolloutPersistenceTelemetry,
+    /// Shared by every clone so an observer installed after cloning still sees all appends.
+    append_observer: Arc<OnceLock<Arc<dyn AppendObserver>>>,
+}
+
+/// Receives rollout items after they were durably appended to a live thread.
+///
+/// Called on the appending task, so implementations should only record the items and defer any
+/// slow work.
+pub trait AppendObserver: Send + Sync {
+    fn observe(&self, items: &[RolloutItem]);
 }
 
 /// Owns persistence acquisition and its live thread while initialization is still fallible.
@@ -132,6 +143,12 @@ impl Drop for LiveThreadInitGuard {
 }
 
 impl LiveThread {
+    /// Installs the observer for every clone of this live thread. Returns false when one is
+    /// already installed.
+    pub fn set_append_observer(&self, observer: Arc<dyn AppendObserver>) -> bool {
+        self.append_observer.set(observer).is_ok()
+    }
+
     pub async fn create(
         thread_store: Arc<dyn ThreadStore>,
         params: CreateThreadParams,
@@ -146,6 +163,7 @@ impl LiveThread {
             thread_store,
             metadata_sync: Arc::new(Mutex::new(metadata_sync)),
             persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
+            append_observer: Arc::default(),
         })
     }
 
@@ -216,6 +234,7 @@ impl LiveThread {
                 thread_store,
                 metadata_sync: Arc::new(Mutex::new(metadata_sync)),
                 persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
+                append_observer: Arc::default(),
             },
             history,
         ))
@@ -230,6 +249,9 @@ impl LiveThread {
         let items = self.persist_appended_items(raw_items).await?;
         if items.is_empty() {
             return Ok(());
+        }
+        if let Some(observer) = self.append_observer.get() {
+            observer.observe(items.as_slice());
         }
         let update = self
             .metadata_sync

@@ -526,7 +526,11 @@ impl App {
                         MergeMessage::Rpc { message } => {
                             let id: RequestId = serde_json::from_value(message["id"].clone())?;
                             let error: JSONRPCErrorError = serde_json::from_value(message["error"].clone())?;
-                            app_server.reject_server_request(id, error).await?;
+                            app_server
+                                .request_handle()
+                                .server_request_reply_handle(id)
+                                .reject(error)
+                                .await?;
                         }
                         MergeMessage::Progress { text } => {
                             if !cancelled {

@@ -2925,6 +2925,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-context-graph"
+version = "0.0.0"
+dependencies = [
+ "codex-history",
+ "codex-protocol",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "codex-context-graph-store"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "codex-context-graph",
+ "codex-history",
+ "codex-protocol",
+ "codex-rollout",
+ "codex-state",
+ "codex-thread-store",
+ "codex-utils-absolute-path",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "sqlx-macros",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "codex-core"
 version = "0.0.0"
 dependencies = [
@@ -2951,6 +2987,7 @@ dependencies = [
  "codex-config",
  "codex-connectors",
  "codex-context-fragments",
+ "codex-context-graph-store",
  "codex-core-plugins",
  "codex-diagnostics",
  "codex-exec-server",

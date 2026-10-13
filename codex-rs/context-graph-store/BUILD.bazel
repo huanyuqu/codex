@@ -1,0 +1,7 @@
+load("//:defs.bzl", "codex_rust_crate")
+
+codex_rust_crate(
+    name = "context-graph-store",
+    crate_name = "codex_context_graph_store",
+    compile_data = glob(["migrations/**"]),
+)

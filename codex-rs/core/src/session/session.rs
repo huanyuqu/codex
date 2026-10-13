@@ -1237,6 +1237,16 @@ impl Session {
                 resumed.history = history;
                 resumed.history_revision = None;
             }
+            if config.features.enabled(Feature::ContextGraph)
+                && let Some(live_thread) = live_thread.as_ref()
+            {
+                codex_context_graph_store::install_live_recorder(
+                    live_thread,
+                    &thread_id.to_string(),
+                    initial_history.get_rollout_items(),
+                    config.sqlite.clone(),
+                );
+            }
             let rollout_path = if let Some(live_thread) = live_thread.as_ref() {
                 live_thread.local_rollout_path().await?
             } else {

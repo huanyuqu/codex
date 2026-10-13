@@ -95,6 +95,8 @@ impl Stage {
 pub enum Feature {
     /// Preview consumer five-hour and weekly allowance history.
     AnalyticsPlanHistory,
+    /// Record each thread's context graph of blocks and branches. Does not change model input.
+    ContextGraph,
     /// Discover model catalogs for OpenAI API-key authentication.
     ApiKeyModelDiscovery,
     /// Forward explicit programs with builtin OpenAI API keys.
@@ -1898,6 +1900,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::GuardianExt,
         key: "guardian_ext",
         stage: Stage::Removed,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::ContextGraph,
+        key: "context_graph",
+        stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
     FeatureSpec {

@@ -1,0 +1,38 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-context-graph-store"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "codex_context_graph_store"
+path = "src/lib.rs"
+
+[[bin]]
+name = "codex-context-graph"
+path = "src/bin/codex-context-graph.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+codex-context-graph = { workspace = true }
+codex-rollout = { workspace = true }
+codex-state = { workspace = true }
+codex-thread-store = { workspace = true }
+codex-utils-absolute-path = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+sqlx-macros = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+codex-history = { workspace = true }
+codex-protocol = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
