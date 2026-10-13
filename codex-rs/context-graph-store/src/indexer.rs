@@ -7,6 +7,7 @@
 //! they keep their extracted cards, so indexing never blocks or breaks the session it serves.
 
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -19,6 +20,7 @@ use codex_context_graph::IndexUpdate;
 use codex_context_graph::RecorderEvent;
 use codex_context_graph::card::BlockCard;
 use codex_context_graph::card::CARD_VERSION;
+use codex_context_graph::card::FileStamp;
 use codex_context_graph::card_prompt::CardPrompt;
 use codex_context_graph::card_prompt::PromptLimits;
 use codex_context_graph::card_prompt::build_card_prompt;
@@ -51,6 +53,9 @@ pub struct IndexerConfig {
     /// Model requests one indexer may make; `None` for no limit.
     pub max_requests: Option<u64>,
     pub limits: PromptLimits,
+    /// How long a session must be idle after a turn before its turns are consolidated into
+    /// episode and branch cards; `None` to never consolidate.
+    pub consolidate_after: Option<Duration>,
 }
 
 impl Default for IndexerConfig {
@@ -61,6 +66,7 @@ impl Default for IndexerConfig {
             max_concurrent_requests: 2,
             max_requests: Some(500),
             limits: PromptLimits::default(),
+            consolidate_after: Some(Duration::from_secs(60)),
         }
     }
 }
@@ -90,6 +96,8 @@ pub struct ShadowIndexer {
     pending_since: Option<Instant>,
     in_flight: JoinSet<BatchResult>,
     requests_started: u64,
+    /// When the last turn ended, while its turns wait to be consolidated.
+    unconsolidated_since: Option<Instant>,
 }
 
 impl ShadowIndexer {
@@ -112,6 +120,7 @@ impl ShadowIndexer {
             pending_since: None,
             in_flight: JoinSet::new(),
             requests_started: 0,
+            unconsolidated_since: None,
         }
     }
 
@@ -121,6 +130,7 @@ impl ShadowIndexer {
             Some(IndexUpdate::Block { card, items }) => {
                 let mut card = *card;
                 redact_card(&mut card);
+                card.file_stamps = file_stamps(&card.entities.files_read);
                 self.store.upsert_card(&self.graph_id, &card).await?;
                 if self.wants_model(&card).await? {
                     self.pending.push((card.clone(), items));
@@ -138,6 +148,7 @@ impl ShadowIndexer {
                         .await?;
                 }
                 self.flush().await;
+                self.unconsolidated_since = Some(Instant::now());
             }
             None => {}
         }
@@ -219,9 +230,21 @@ impl ShadowIndexer {
             let deadline = self
                 .pending_since
                 .map(|since| tokio::time::Instant::from_std(since + self.config.batch_wait));
+            // Consolidation waits until the cards of the last turn are written.
+            let idle = self
+                .unconsolidated_since
+                .filter(|_| self.pending.is_empty() && self.in_flight.is_empty())
+                .zip(self.config.consolidate_after)
+                .map(|(since, after)| tokio::time::Instant::from_std(since + after));
             let next = tokio::select! {
-                event = events.recv() => Next::Event(event),
+                event = events.recv() => {
+                    if self.unconsolidated_since.is_some() {
+                        self.unconsolidated_since = Some(Instant::now());
+                    }
+                    Next::Event(event)
+                }
                 () = sleep_until(deadline), if deadline.is_some() => Next::Flush,
+                () = sleep_until(idle), if idle.is_some() => Next::Idle,
                 Some(result) = self.in_flight.join_next(), if !self.in_flight.is_empty() => {
                     Next::Done(result)
                 }
@@ -234,10 +257,25 @@ impl ShadowIndexer {
                 }
                 Next::Event(None) => break,
                 Next::Flush => self.flush().await,
+                Next::Idle => self.consolidate().await,
                 Next::Done(result) => self.handle(result).await,
             }
         }
         self.finish().await;
+    }
+
+    /// Sums up the branch's settled turns, with the model while the request budget lasts.
+    async fn consolidate(&mut self) {
+        self.unconsolidated_since = None;
+        let model = self.model.clone().filter(|_| !self.budget_spent());
+        match self
+            .store
+            .consolidate_branch(&self.graph_id, &self.branch, model.as_deref())
+            .await
+        {
+            Ok(done) => self.requests_started += done.requests,
+            Err(err) => warn!("context graph consolidation failed: {err:#}"),
+        }
     }
 
     fn budget_spent(&self) -> bool {
@@ -360,6 +398,7 @@ impl ShadowIndexer {
 enum Next {
     Event(Option<RecorderEvent>),
     Flush,
+    Idle,
     Done(Result<BatchResult, tokio::task::JoinError>),
 }
 
@@ -368,6 +407,36 @@ async fn sleep_until(deadline: Option<tokio::time::Instant>) {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
     }
+}
+
+/// The current state of the files at `paths` that exist; relative paths, whose directory is
+/// unknown, are skipped.
+pub fn file_stamps(paths: &[String]) -> Vec<FileStamp> {
+    paths
+        .iter()
+        .filter(|path| Path::new(path).is_absolute())
+        .filter_map(|path| file_stamp(path))
+        .collect()
+}
+
+fn file_stamp(path: &str) -> Option<FileStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified_ms = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    Some(FileStamp {
+        path: path.to_string(),
+        modified_ms: u64::try_from(modified_ms).unwrap_or(u64::MAX),
+        len: metadata.len(),
+    })
+}
+
+/// Whether a file a block read changed since the block saw it, or was removed.
+pub fn file_changed(stamp: &FileStamp) -> bool {
+    file_stamp(&stamp.path).is_none_or(|now| now != *stamp)
 }
 
 /// Removes secrets from every free-text field of `card`.

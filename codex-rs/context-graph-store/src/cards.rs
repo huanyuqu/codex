@@ -1,5 +1,6 @@
 //! Stored index cards and indexing costs.
 
+use std::collections::HashMap;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -7,6 +8,8 @@ use codex_context_graph::BlockId;
 use codex_context_graph::BranchId;
 use codex_context_graph::card::BlockCard;
 use codex_context_graph::card::EXTRACTED_INDEXER;
+use codex_context_graph::episode::BranchCard;
+use codex_context_graph::episode::EpisodeCard;
 use codex_context_graph::turn::TurnCard;
 use serde::Serialize;
 use sqlx::Row;
@@ -132,6 +135,86 @@ impl LocalContextGraphStore {
             .await?;
         rows.into_iter()
             .map(|row| Ok(serde_json::from_str(&row.try_get::<String, _>("card")?)?))
+            .collect()
+    }
+
+    /// Stores episode cards, replacing any that start at the same turn.
+    pub async fn save_episode_cards(
+        &self,
+        graph_id: &str,
+        cards: &[EpisodeCard],
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        for card in cards {
+            sqlx::query(
+                "INSERT INTO cg_episode_cards (graph_id, first_block, last_block, indexer, card, \
+                 updated_at) VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(graph_id, first_block) DO UPDATE SET \
+                 last_block = excluded.last_block, indexer = excluded.indexer, \
+                 card = excluded.card, updated_at = excluded.updated_at",
+            )
+            .bind(graph_id)
+            .bind(card.first_block.as_str())
+            .bind(card.last_block.as_str())
+            .bind(&card.indexer)
+            .bind(serde_json::to_string(card)?)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn load_episode_cards(&self, graph_id: &str) -> anyhow::Result<Vec<EpisodeCard>> {
+        let rows = sqlx::query(
+            "SELECT card FROM cg_episode_cards WHERE graph_id = ? ORDER BY updated_at, rowid",
+        )
+        .bind(graph_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| Ok(serde_json::from_str(&row.try_get::<String, _>("card")?)?))
+            .collect()
+    }
+
+    pub async fn save_branch_card(
+        &self,
+        graph_id: &str,
+        branch: &BranchId,
+        card: &BranchCard,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO cg_branch_cards (graph_id, branch_id, indexer, card, updated_at) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT(graph_id, branch_id) DO UPDATE SET indexer = excluded.indexer, \
+             card = excluded.card, updated_at = excluded.updated_at",
+        )
+        .bind(graph_id)
+        .bind(branch.as_str())
+        .bind(&card.indexer)
+        .bind(serde_json::to_string(card)?)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn load_branch_cards(
+        &self,
+        graph_id: &str,
+    ) -> anyhow::Result<HashMap<BranchId, BranchCard>> {
+        let rows = sqlx::query("SELECT branch_id, card FROM cg_branch_cards WHERE graph_id = ?")
+            .bind(graph_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    BranchId::new(row.try_get::<String, _>("branch_id")?),
+                    serde_json::from_str(&row.try_get::<String, _>("card")?)?,
+                ))
+            })
             .collect()
     }
 

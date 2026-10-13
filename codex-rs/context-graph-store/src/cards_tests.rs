@@ -23,6 +23,7 @@ fn card(indexer: &str, version: u32, title: &str) -> BlockCard {
         claims: Vec::new(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        file_stamps: Vec::new(),
         tokens: 1,
     }
 }

@@ -206,11 +206,56 @@ async fn renames_stick_and_merges_are_recorded() {
         target: branch.id.clone(),
         source: BranchId::new("br_side"),
         source_head: branch.head.clone(),
-        mode: "fold".to_string(),
+        target_head: None,
+        merge_block: None,
+        mode: MergeMode::Fold,
     };
     store
         .record_merge("graph-1", &merge)
         .await
         .unwrap_or_else(|err| panic!("record merge: {err}"));
     assert_eq!(store.load_merges("graph-1").await.ok(), Some(vec![merge]));
+}
+
+#[tokio::test]
+async fn names_given_before_a_thread_records_apply_to_its_branch() {
+    let home = TempDir::new().unwrap_or_else(|err| panic!("temp dir: {err}"));
+    let store = open_store(&home).await;
+    assert_eq!(
+        store
+            .name_thread_branch("thread-fork", "try-sqlite")
+            .await
+            .ok(),
+        Some(None)
+    );
+    assert_eq!(
+        store.thread_branch_name("thread-fork").await.ok().flatten(),
+        Some("try-sqlite".to_string())
+    );
+
+    let mut branch = Branch::new(BranchId::new("br_fork"), "fork-1234");
+    branch.thread_id = Some("thread-fork".to_string());
+    store
+        .upsert_branch("graph-1", &branch)
+        .await
+        .unwrap_or_else(|err| panic!("upsert: {err}"));
+    let name = |store: &LocalContextGraphStore| {
+        let store = store.clone();
+        async move {
+            store
+                .branch_of_thread("thread-fork")
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, branch)| branch.name)
+        }
+    };
+    assert_eq!(name(&store).await, Some("try-sqlite".to_string()));
+
+    // Naming a recorded thread renames its branch at once.
+    assert_eq!(
+        store.name_thread_branch("thread-fork", "sqlite").await.ok(),
+        Some(Some("graph-1".to_string()))
+    );
+    assert_eq!(name(&store).await, Some("sqlite".to_string()));
 }

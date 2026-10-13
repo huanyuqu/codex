@@ -26,18 +26,26 @@ use codex_context_graph::GraphChange;
 use codex_context_graph::GraphRecorder;
 use codex_context_graph::ObservedBlock;
 use codex_context_graph::RecorderEvent;
+use codex_context_graph::card::BlockCard;
+use codex_protocol::ThreadId;
 use codex_rollout::RolloutItem;
 use codex_state::SqliteConfig;
 use codex_thread_store::AppendObserver;
 use codex_thread_store::LiveThread;
+use codex_thread_store::LoadThreadHistoryParams;
+use codex_thread_store::ThreadStore;
+use codex_thread_store::ThreadStoreError;
 use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::LocalContextGraphStore;
 use crate::indexer::IndexerConfig;
 use crate::indexer::ShadowIndexer;
+use crate::merges::MergeMode;
+use crate::merges::MergeRecord;
 use crate::model::ShadowModel;
 use crate::snapshot::BranchSnapshot;
+use crate::snapshot::replay_blocks;
 
 /// The graph a thread records into and its branch there.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,22 +214,31 @@ impl LocalContextGraphStore {
                 .rev()
                 .nth(7)
                 .map_or(thread_id, |(start, _)| &thread_id[start..]);
+            let name = match self.thread_branch_name(thread_id).await? {
+                Some(name) => name,
+                None => format!("fork-{short}"),
+            };
             return Ok(GraphMembership::fork(
                 thread_id,
                 &graph_id,
                 parent_branch.id,
-                format!("fork-{short}"),
+                name,
             ));
         }
         Ok(GraphMembership::root(thread_id))
     }
 }
 
+/// Replayed blocks of referenced threads, by thread and head.
+type ReferencedBlocks = HashMap<(String, Option<BlockId>), Arc<Vec<ObservedBlock>>>;
+
 /// A live thread's branch, for recall.
 pub struct LiveContextGraph {
     membership: GraphMembership,
     sqlite: SqliteConfig,
     state: Arc<Mutex<RecorderState>>,
+    /// Blocks of referenced threads by thread and head, so each rollout is replayed once.
+    references: Mutex<ReferencedBlocks>,
 }
 
 impl LiveContextGraph {
@@ -254,22 +271,132 @@ impl LiveContextGraph {
 
     /// The branch's history with the cards stored so far.
     pub async fn snapshot(&self) -> anyhow::Result<BranchSnapshot> {
-        let observed = self.observed_history();
-        let cards = self
-            .store()
+        self.build_snapshot(None).await
+    }
+
+    /// The branch's history with the blocks of the branches it references, whose rollouts are
+    /// read from `threads`. A reference that cannot be read is left out.
+    pub async fn snapshot_with_references(
+        &self,
+        threads: &dyn ThreadStore,
+    ) -> anyhow::Result<BranchSnapshot> {
+        self.build_snapshot(Some(threads)).await
+    }
+
+    /// How many branches this branch references, so callers notice new references.
+    pub async fn reference_count(&self) -> anyhow::Result<usize> {
+        Ok(self.references(&self.store().await?).await?.len())
+    }
+
+    async fn references(&self, store: &LocalContextGraphStore) -> anyhow::Result<Vec<MergeRecord>> {
+        Ok(store
+            .load_merges(&self.membership.graph_id)
             .await?
+            .into_iter()
+            .filter(|merge| {
+                merge.target == self.membership.branch && merge.mode == MergeMode::Reference
+            })
+            .collect())
+    }
+
+    async fn build_snapshot(
+        &self,
+        threads: Option<&dyn ThreadStore>,
+    ) -> anyhow::Result<BranchSnapshot> {
+        let observed = self.observed_history();
+        let store = self.store().await?;
+        let cards: HashMap<BlockId, BlockCard> = store
             .load_cards(&self.membership.graph_id)
             .await
             .context("failed to load context graph cards")?
             .into_iter()
             .map(|card| (card.block_id.clone(), card))
             .collect();
-        Ok(BranchSnapshot::new(
+        let mut snapshot = BranchSnapshot::new(
             self.membership.graph_id.clone(),
             self.membership.branch.clone(),
             observed,
-            cards,
-        ))
+            &cards,
+        );
+        snapshot.episodes = store
+            .load_episode_cards(&self.membership.graph_id)
+            .await
+            .context("failed to load context graph episodes")?;
+        let Some(threads) = threads else {
+            return Ok(snapshot);
+        };
+        let references = self.references(&store).await?;
+        if references.is_empty() {
+            return Ok(snapshot);
+        }
+        let Some(graph) = store.load_graph(&self.membership.graph_id).await? else {
+            return Ok(snapshot);
+        };
+        for merge in references {
+            let Some(source) = graph.branch(&merge.source) else {
+                continue;
+            };
+            let Some(thread_id) = source.thread_id.as_deref() else {
+                continue;
+            };
+            match self
+                .referenced_blocks(threads, thread_id, merge.source_head.as_ref())
+                .await
+            {
+                Ok(blocks) => snapshot.add_reference(
+                    &source.name,
+                    merge.target_head.as_ref(),
+                    blocks.as_ref().clone(),
+                    &cards,
+                ),
+                Err(err) => warn!("referenced branch {} unavailable: {err:#}", source.name),
+            }
+        }
+        Ok(snapshot)
+    }
+
+    /// The blocks of thread `thread_id` in history order with their items, up to `until`, read
+    /// from `threads`.
+    pub async fn referenced_blocks(
+        &self,
+        threads: &dyn ThreadStore,
+        thread_id: &str,
+        until: Option<&BlockId>,
+    ) -> anyhow::Result<Arc<Vec<ObservedBlock>>> {
+        let key = (thread_id.to_string(), until.cloned());
+        if let Some(blocks) = self
+            .references
+            .lock()
+            .ok()
+            .and_then(|references| references.get(&key).cloned())
+        {
+            return Ok(blocks);
+        }
+        let items = saved_items(threads, thread_id).await?;
+        let blocks = Arc::new(replay_blocks(thread_id, &items, until)?);
+        if let Ok(mut references) = self.references.lock() {
+            references.insert(key, Arc::clone(&blocks));
+        }
+        Ok(blocks)
+    }
+}
+
+/// The saved items of thread `thread_id`: its whole history, or for a thread whose history is
+/// stored in pages, the latest history its model saw.
+pub async fn saved_items(
+    threads: &dyn ThreadStore,
+    thread_id: &str,
+) -> anyhow::Result<Vec<RolloutItem>> {
+    let params = LoadThreadHistoryParams {
+        thread_id: ThreadId::from_string(thread_id)?,
+        include_archived: true,
+    };
+    match threads.load_history(params.clone()).await {
+        Ok(history) => Ok(history.items),
+        Err(ThreadStoreError::Unsupported { .. }) => {
+            Ok(threads.load_latest_model_context(params).await?.items)
+        }
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -353,6 +480,7 @@ pub fn install_live_recorder(
         membership,
         sqlite,
         state,
+        references: Mutex::default(),
     }))
 }
 

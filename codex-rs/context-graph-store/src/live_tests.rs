@@ -406,3 +406,157 @@ async fn threads_find_their_graph_membership() {
         GraphMembership::root("root-1")
     );
 }
+
+#[tokio::test]
+async fn snapshots_include_the_blocks_of_referenced_branches() {
+    let dir = TempDir::new().unwrap_or_else(|err| panic!("temp dir: {err}"));
+    let sqlite = sqlite_config(&dir);
+    let threads = InMemoryThreadStore::for_id("context-graph-references");
+    let cwd = &dir;
+    let open = |thread_id: ThreadId| {
+        let threads = Arc::clone(&threads);
+        async move {
+            LiveThread::create(threads, create_params(thread_id, cwd))
+                .await
+                .unwrap_or_else(|err| panic!("create live thread: {err}"))
+        }
+    };
+    let shared = vec![
+        message("msg_u1", "user", "add retries"),
+        message("msg_a1", "assistant", "retries added"),
+    ];
+
+    let parent_id = ThreadId::new();
+    let parent = open(parent_id).await;
+    parent
+        .append_items(&shared)
+        .await
+        .unwrap_or_else(|err| panic!("append: {err}"));
+    let parent_graph = install_live_recorder(
+        &parent,
+        GraphMembership::root(&parent_id.to_string()),
+        &shared,
+        sqlite.clone(),
+        None,
+    )
+    .unwrap_or_else(|| panic!("parent recorder not installed"));
+    let store = LocalContextGraphStore::open(&sqlite)
+        .await
+        .unwrap_or_else(|err| panic!("open store: {err}"));
+    stored_graph(&store, &parent_id.to_string(), 2).await;
+
+    let child_id = ThreadId::new();
+    let child = open(child_id).await;
+    child
+        .append_items(&shared)
+        .await
+        .unwrap_or_else(|err| panic!("append: {err}"));
+    let membership = store
+        .membership_for_thread(&child_id.to_string(), Some(&parent_id.to_string()))
+        .await
+        .unwrap_or_else(|err| panic!("membership: {err}"));
+    install_live_recorder(&child, membership, &shared, sqlite.clone(), None)
+        .unwrap_or_else(|| panic!("child recorder not installed"));
+    child
+        .append_items(&[
+            message("msg_u2", "user", "try jitter"),
+            message("msg_a2", "assistant", "jitter works"),
+        ])
+        .await
+        .unwrap_or_else(|err| panic!("append: {err}"));
+    parent
+        .append_items(&[message("msg_u3", "user", "what did the fork find?")])
+        .await
+        .unwrap_or_else(|err| panic!("append: {err}"));
+    stored_graph(&store, &parent_id.to_string(), 5).await;
+
+    let tree = store
+        .branch_tree(&parent_id.to_string())
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| panic!("no tree"));
+    let fork_name = tree
+        .rows()
+        .into_iter()
+        .find(|row| !row.current)
+        .map(|row| row.name)
+        .unwrap_or_default();
+    let plan = tree
+        .plan_merge(&fork_name, crate::MergeMode::Reference)
+        .unwrap_or_else(|err| panic!("plan: {err}"));
+    store
+        .record_merge(&tree.graph_id, &plan.record)
+        .await
+        .unwrap_or_else(|err| panic!("record: {err}"));
+
+    assert_eq!(parent_graph.reference_count().await.ok(), Some(1));
+    let snapshot = parent_graph
+        .snapshot_with_references(threads.as_ref())
+        .await
+        .unwrap_or_else(|err| panic!("snapshot: {err}"));
+    let blocks: Vec<(String, bool)> = snapshot
+        .blocks
+        .iter()
+        .zip(&snapshot.origins)
+        .map(|(block, origin)| (block.id.to_string(), origin.is_some()))
+        .collect();
+    assert_eq!(
+        blocks,
+        vec![
+            ("blk_msg_u1".to_string(), false),
+            ("blk_msg_a1".to_string(), false),
+            ("blk_msg_u3".to_string(), false),
+            ("blk_msg_u2".to_string(), true),
+            ("blk_msg_a2".to_string(), true),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_thread_keeps_recording_into_its_branch() {
+    let dir = TempDir::new().unwrap_or_else(|err| panic!("temp dir: {err}"));
+    let sqlite = sqlite_config(&dir);
+    let first = live_thread(&dir).await;
+    let thread_id = ThreadId::new().to_string();
+    let store = LocalContextGraphStore::open(&sqlite)
+        .await
+        .unwrap_or_else(|err| panic!("open store: {err}"));
+    let membership = store
+        .membership_for_thread(&thread_id, None)
+        .await
+        .unwrap_or_else(|err| panic!("membership: {err}"));
+    install_live_recorder(&first, membership, &[], sqlite.clone(), None)
+        .unwrap_or_else(|| panic!("recorder not installed"));
+    let before = vec![
+        message("msg_u1", "user", "before resume"),
+        message("msg_a1", "assistant", "first reply"),
+    ];
+    first
+        .append_items(&before)
+        .await
+        .unwrap_or_else(|err| panic!("append: {err}"));
+    stored_graph(&store, &thread_id, 2).await;
+
+    // A new process resumes the thread: same branch, the saved items replayed first.
+    let resumed = live_thread(&dir).await;
+    let membership = store
+        .membership_for_thread(&thread_id, None)
+        .await
+        .unwrap_or_else(|err| panic!("membership: {err}"));
+    assert_eq!(membership.graph_id, thread_id);
+    install_live_recorder(&resumed, membership, &before, sqlite.clone(), None)
+        .unwrap_or_else(|| panic!("recorder not installed"));
+    resumed
+        .append_items(&[
+            message("msg_u2", "user", "after resume"),
+            message("msg_a2", "assistant", "second reply"),
+        ])
+        .await
+        .unwrap_or_else(|err| panic!("append: {err}"));
+    let graph = stored_graph(&store, &thread_id, 4).await;
+    let head = graph
+        .branch(&BranchId::for_thread(&thread_id))
+        .and_then(|branch| branch.head.clone());
+    assert_eq!(head, Some(BlockId::for_item_key("msg_a2")));
+}

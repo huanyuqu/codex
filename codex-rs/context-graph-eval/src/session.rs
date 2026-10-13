@@ -93,6 +93,6 @@ pub async fn load_session(
         replayed.graph_id,
         replayed.branch,
         blocks,
-        stored,
+        &stored,
     ))
 }

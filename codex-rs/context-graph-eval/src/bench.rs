@@ -203,6 +203,7 @@ fn plain(history: &History<'_>, indices: impl IntoIterator<Item = usize>) -> Pro
             reason: Reason::Recent,
             note: None,
             superseded_by: None,
+            file_changed: false,
             tokens: history.tokens(index),
         })
         .collect();

@@ -30,7 +30,11 @@ use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
 use tokio::sync::OnceCell;
 
+mod branch_tree;
 mod cards;
+mod consolidate;
+mod forget;
+mod import;
 mod indexer;
 mod live;
 mod merges;
@@ -39,14 +43,23 @@ mod recall;
 mod snapshot;
 mod views;
 
+pub use branch_tree::BranchTree;
+pub use branch_tree::MergeError;
+pub use branch_tree::MergePlan;
 pub use cards::IndexRequest;
 pub use cards::IndexUsage;
+pub use consolidate::Consolidation;
+pub use import::ImportReport;
+pub use import::SavedItems;
+pub use import::SavedThread;
 pub use indexer::IndexerConfig;
 pub use indexer::ShadowIndexer;
 pub use live::GraphMembership;
 pub use live::LiveContextGraph;
 pub use live::LiveIndexing;
 pub use live::install_live_recorder;
+pub use live::saved_items;
+pub use merges::MergeMode;
 pub use merges::MergeRecord;
 pub use model::ModelCompletion;
 pub use model::ShadowModel;
@@ -56,6 +69,7 @@ pub use recall::RecallConfig;
 pub use recall::RecallStats;
 pub use recall::Recaller;
 pub use snapshot::BranchSnapshot;
+pub use snapshot::replay_blocks;
 pub use views::ViewRecord;
 
 pub const CONTEXT_GRAPH_DB_FILENAME: &str = "context_graph_1.sqlite";
@@ -217,6 +231,43 @@ impl LocalContextGraphStore {
         Ok(renamed > 0)
     }
 
+    /// Names the branch `thread_id` records into, now if it has one and otherwise once it
+    /// first records. Returns the graph of the renamed branch, if there was one.
+    pub async fn name_thread_branch(
+        &self,
+        thread_id: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query(
+            "INSERT INTO cg_thread_names (thread_id, name) VALUES (?, ?) \
+             ON CONFLICT(thread_id) DO UPDATE SET name = excluded.name",
+        )
+        .bind(thread_id)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+        let graph_id = sqlx::query_scalar::<_, String>(
+            "UPDATE cg_branches SET name = ? WHERE thread_id = ? RETURNING graph_id",
+        )
+        .bind(name)
+        .bind(thread_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(graph_id)
+    }
+
+    /// The name given to `thread_id`'s branch before it recorded, if any.
+    pub async fn thread_branch_name(&self, thread_id: &str) -> anyhow::Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar::<_, String>("SELECT name FROM cg_thread_names WHERE thread_id = ?")
+                .bind(thread_id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
     /// Loads and validates a stored graph.
     pub async fn load_graph(&self, graph_id: &str) -> anyhow::Result<Option<ContextGraph>> {
         let branch_rows = sqlx::query(
@@ -361,13 +412,15 @@ async fn upsert_branch(
 ) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO cg_branches (graph_id, branch_id, name, thread_id, parent_branch_id, \
-         fork_point, head, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+         fork_point, head, status) VALUES (?, ?, \
+         COALESCE((SELECT name FROM cg_thread_names WHERE thread_id = ?), ?), ?, ?, ?, ?, ?) \
          ON CONFLICT(graph_id, branch_id) DO UPDATE SET thread_id = excluded.thread_id, \
          parent_branch_id = excluded.parent_branch_id, fork_point = excluded.fork_point, \
          head = excluded.head, status = excluded.status",
     )
     .bind(graph_id)
     .bind(branch.id.as_str())
+    .bind(branch.thread_id.as_deref())
     .bind(&branch.name)
     .bind(branch.thread_id.as_deref())
     .bind(branch.parent.as_ref().map(BranchId::as_str))

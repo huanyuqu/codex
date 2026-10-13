@@ -73,6 +73,7 @@ impl Session {
                 claims: Vec::new(),
                 depends_on: Vec::new(),
                 supersedes: Vec::new(),
+                file_stamps: Vec::new(),
                 tokens: 0,
             });
             session.items.push(vec![message(role, text)]);
@@ -90,6 +91,8 @@ impl Session {
                     card,
                     items,
                     complete: true,
+                    origin: None,
+                    changed: false,
                 })
                 .collect(),
         )
