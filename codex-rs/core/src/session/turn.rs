@@ -388,15 +388,31 @@ pub(crate) async fn run_turn(
         return Ok(None);
     }
 
+    // Branches the request names with `@` are referenced, or folded in when the session does
+    // not recall.
+    let question = crate::context_graph::question_text(&user_input);
+    // The context graph's futures are boxed to keep this turn's future small.
+    for merge in Box::pin(crate::context_graph::resolve_branch_mentions(
+        &sess, &question,
+    ))
+    .await
+    {
+        sess.record_conversation_items(
+            &turn_context,
+            &first_step_context.settings.model_info,
+            std::slice::from_ref(&merge.note),
+        )
+        .await;
+        crate::context_graph::commit_merge(&sess, &merge).await;
+    }
     // A session that recalls may rebuild its history for this turn's request, falling back to
     // summary compaction when recall fails and the context window is full.
-    let question = crate::context_graph::question_text(&user_input);
-    if !crate::context_graph::recall_into_history(
+    if !Box::pin(crate::context_graph::recall_into_history(
         &sess,
         &first_step_context,
         Some(&question),
         crate::context_graph::RecallTrigger::TurnStart,
-    )
+    ))
     .await?
         && crate::context_graph::recalls(&sess)
         && super::context_window::context_window_token_status(sess.as_ref(), &turn_context)
@@ -414,6 +430,14 @@ pub(crate) async fn run_turn(
         )
         .await?;
     }
+
+    // Branches of the conversation that share this workspace take turns.
+    let _workspace_lease = Box::pin(crate::context_graph::acquire_workspace_lease(
+        &sess,
+        &turn_context,
+        &cancellation_token,
+    ))
+    .await?;
 
     // Only speculate after hooks accept the turn, using its finalized tools and permissions.
     {
@@ -1550,12 +1574,12 @@ async fn run_auto_compact(
     {
         return Ok(false);
     }
-    if crate::context_graph::recall_into_history(
+    if Box::pin(crate::context_graph::recall_into_history(
         sess,
         &replacement_step_context,
         /*question*/ None,
         crate::context_graph::RecallTrigger::ContextLimit,
-    )
+    ))
     .await?
     {
         return Ok(true);
@@ -1582,6 +1606,7 @@ async fn run_summary_compact(
     phase: CompactionPhase,
     candidate: Option<Box<BackgroundCompactionCandidate>>,
 ) -> CodexResult<bool> {
+    crate::context_graph::forget_window(sess);
     let turn_context = &step_context.turn;
     let world_state = Arc::new(
         sess.build_world_state_for_step(&replacement_step_context, /*new_window*/ true)

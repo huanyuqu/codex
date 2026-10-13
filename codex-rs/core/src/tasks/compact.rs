@@ -51,16 +51,17 @@ impl SessionTask for CompactTask {
                 .await?,
         );
         // A session that recalls rebuilds its history for the latest request instead.
-        if crate::context_graph::recall_into_history(
+        if Box::pin(crate::context_graph::recall_into_history(
             &session,
             &step_context,
             /*question*/ None,
             crate::context_graph::RecallTrigger::Manual,
-        )
+        ))
         .await?
         {
             return Ok(None);
         }
+        crate::context_graph::forget_window(&session);
         if ctx.config.features.enabled(Feature::TokenBudget) {
             crate::compact_token_budget::run_manual_compact_task(
                 session,

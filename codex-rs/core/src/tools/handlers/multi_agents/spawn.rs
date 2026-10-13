@@ -50,7 +50,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
     }
 }
 
-async fn handle_spawn_agent(
+pub(crate) async fn handle_spawn_agent(
     invocation: ToolInvocation,
 ) -> Result<SpawnAgentResult, FunctionCallError> {
     let ToolInvocation {
@@ -231,6 +231,12 @@ struct SpawnAgentArgs {
 pub(crate) struct SpawnAgentResult {
     agent_id: String,
     nickname: Option<String>,
+}
+
+impl SpawnAgentResult {
+    pub(crate) fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
 }
 
 impl ToolOutput for SpawnAgentResult {

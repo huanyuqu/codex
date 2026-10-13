@@ -1237,7 +1237,7 @@ impl Session {
                 resumed.history = history;
                 resumed.history_revision = None;
             }
-            let context_graph = crate::context_graph::start(
+            let context_graph = Box::pin(crate::context_graph::start(
                 &config,
                 session_configuration
                     .provider
@@ -1246,7 +1246,9 @@ impl Session {
                 session_configuration.forked_from_thread_id,
                 live_thread.as_ref(),
                 initial_history.get_rollout_items(),
-            )
+                !session_configuration.session_source.is_non_root_agent(),
+                Arc::clone(&thread_store),
+            ))
             .await;
             let rollout_path = if let Some(live_thread) = live_thread.as_ref() {
                 live_thread.local_rollout_path().await?

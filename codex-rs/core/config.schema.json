@@ -515,6 +515,25 @@
       ],
       "type": "object"
     },
+    "BranchCompletion": {
+      "description": "What happens when a background branch finishes its turn.",
+      "oneOf": [
+        {
+          "description": "Tell the chat that started it.",
+          "enum": [
+            "notify"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Fold its work into the chat that started it.",
+          "enum": [
+            "fold"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "BrowserUseConfigToml": {
       "additionalProperties": false,
       "properties": {
@@ -1419,6 +1438,10 @@
       "additionalProperties": false,
       "description": "Context graph settings loaded from config.toml.",
       "properties": {
+        "edit_creates_branch": {
+          "description": "Whether editing a past prompt continues in a new branch, keeping the original conversation, instead of rewinding it.",
+          "type": "boolean"
+        },
         "index_model": {
           "description": "Model that writes block cards. Defaults to the provider's memory extraction model.",
           "type": "string"
@@ -1431,14 +1454,35 @@
           ],
           "description": "How threads manage their history. Recall needs the `context_graph` feature."
         },
+        "on_branch_complete": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/BranchCompletion"
+            }
+          ],
+          "description": "What happens when a branch forked with `/fork --bg` finishes its turn."
+        },
         "read_model": {
           "description": "Model that reads blocks whose cards were not enough to decide. Defaults to the screening model; `\"none\"` skips reading.",
           "type": "string"
+        },
+        "rebuild_overlap_percent": {
+          "description": "In `recall` mode, the share of the blocks a request needs, in percent, that must already be in the context for recall to add the missing ones instead of rebuilding the context.",
+          "format": "uint8",
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "type": "integer"
         },
         "recall_budget_tokens": {
           "description": "Token budget of a recalled context.",
           "format": "uint32",
           "minimum": 1000.0,
+          "type": "integer"
+        },
+        "recall_timeout_secs": {
+          "description": "Longest a recall may take before the turn goes on without it, in seconds.",
+          "format": "uint64",
+          "minimum": 1.0,
           "type": "integer"
         },
         "recent_turns": {

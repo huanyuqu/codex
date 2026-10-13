@@ -7,9 +7,12 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::effective_tool_mode;
 use crate::tools::handlers::ApplyPatchHandler;
+use crate::tools::handlers::BranchCreateHandler;
+use crate::tools::handlers::BranchMergeHandler;
 use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
 use crate::tools::handlers::ContextExpandHandler;
+use crate::tools::handlers::ContextRecallHandler;
 use crate::tools::handlers::ContextSearchHandler;
 use crate::tools::handlers::CurrentTimeHandler;
 use crate::tools::handlers::DynamicToolHandler;
@@ -1363,12 +1366,14 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         registry.add(GetContextRemainingHandler);
     }
 
-    // Recall leaves parts of the history out of the context; these tools read them back.
-    if features.enabled(Feature::ContextGraph)
-        && turn_context.config.context_graph.mode != codex_config::types::ContextMode::Full
-    {
+    // Recall and compaction leave parts of the history out of the context; these tools read
+    // them back from the context graph, which root sessions record.
+    if features.enabled(Feature::ContextGraph) && !turn_context.session_source.is_non_root_agent() {
         registry.add(ContextSearchHandler);
         registry.add(ContextExpandHandler);
+        registry.add(ContextRecallHandler);
+        registry.add(BranchCreateHandler);
+        registry.add(BranchMergeHandler);
     }
 
     let current_time_reminder_enabled = features.enabled(Feature::CurrentTimeReminder);

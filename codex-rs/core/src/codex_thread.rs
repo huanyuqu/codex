@@ -205,6 +205,16 @@ pub struct GuardianRootSnapshot {
     pub trusted_skill_paths: Vec<String>,
 }
 
+/// A branch merged into a thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextBranchMerge {
+    pub graph_id: String,
+    pub branch_id: String,
+    pub branch_name: String,
+    /// User turns the merged branch added after it diverged.
+    pub turns: usize,
+}
+
 pub struct CodexThread {
     pub(crate) session: Arc<Session>,
     pub(crate) io: SessionIo,
@@ -595,6 +605,53 @@ impl CodexThread {
             .await?;
         }
         self.io.submit_turn_input(request, mode).await
+    }
+
+    /// How the thread manages the history its model sees, when it records a context graph.
+    pub fn context_mode(&self) -> Option<codex_config::types::ContextMode> {
+        self.session
+            .services
+            .context_graph
+            .as_ref()
+            .map(|service| service.mode())
+    }
+
+    /// Changes how the thread manages the history its model sees, from its next turn on.
+    pub fn set_context_mode(&self, mode: codex_config::types::ContextMode) -> anyhow::Result<()> {
+        let service = self
+            .session
+            .services
+            .context_graph
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("this thread does not record a context graph"))?;
+        service.set_mode(mode);
+        Ok(())
+    }
+
+    /// Merges the branch `branch` names, a branch ID, a branch name or a thread ID, into this
+    /// thread: its note enters the history, and the merge is recorded in the context graph.
+    pub async fn merge_context_branch(
+        &self,
+        branch: &str,
+        mode: codex_context_graph_store::MergeMode,
+    ) -> anyhow::Result<ContextBranchMerge> {
+        let service = self
+            .session
+            .services
+            .context_graph
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("this thread does not record a context graph"))?;
+        let merge = service.prepare_merge(branch, mode).await?;
+        self.inject_response_items(vec![merge.note.clone()])
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to add the merge to the history: {err}"))?;
+        service.commit_merge(&merge).await?;
+        Ok(ContextBranchMerge {
+            graph_id: merge.graph_id,
+            branch_id: merge.branch_id,
+            branch_name: merge.branch_name,
+            turns: merge.turns,
+        })
     }
 
     /// Persist whether this thread is eligible for future memory generation.

@@ -368,6 +368,17 @@ pub enum ContextMode {
     Recall,
 }
 
+/// What happens when a background branch finishes its turn.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum BranchCompletion {
+    /// Tell the chat that started it.
+    #[default]
+    Notify,
+    /// Fold its work into the chat that started it.
+    Fold,
+}
+
 /// Context graph settings loaded from config.toml.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -391,6 +402,18 @@ pub struct ContextGraphToml {
     /// the history.
     #[schemars(range(min = 10, max = 95))]
     pub soft_limit_percent: Option<u8>,
+    /// What happens when a branch forked with `/fork --bg` finishes its turn.
+    pub on_branch_complete: Option<BranchCompletion>,
+    /// Longest a recall may take before the turn goes on without it, in seconds.
+    #[schemars(range(min = 1))]
+    pub recall_timeout_secs: Option<u64>,
+    /// In `recall` mode, the share of the blocks a request needs, in percent, that must already
+    /// be in the context for recall to add the missing ones instead of rebuilding the context.
+    #[schemars(range(min = 0, max = 100))]
+    pub rebuild_overlap_percent: Option<u8>,
+    /// Whether editing a past prompt continues in a new branch, keeping the original
+    /// conversation, instead of rewinding it.
+    pub edit_creates_branch: Option<bool>,
 }
 
 /// Effective context graph settings after defaults are applied.
@@ -403,6 +426,10 @@ pub struct ContextGraphConfig {
     pub recall_budget_tokens: u32,
     pub recent_turns: usize,
     pub soft_limit_percent: u8,
+    pub on_branch_complete: BranchCompletion,
+    pub recall_timeout_secs: u64,
+    pub rebuild_overlap_percent: u8,
+    pub edit_creates_branch: bool,
 }
 
 impl Default for ContextGraphConfig {
@@ -415,6 +442,10 @@ impl Default for ContextGraphConfig {
             recall_budget_tokens: 40_000,
             recent_turns: 2,
             soft_limit_percent: 50,
+            on_branch_complete: BranchCompletion::Notify,
+            recall_timeout_secs: 120,
+            rebuild_overlap_percent: 50,
+            edit_creates_branch: true,
         }
     }
 }
@@ -439,6 +470,20 @@ impl From<ContextGraphToml> for ContextGraphConfig {
                 .soft_limit_percent
                 .unwrap_or(defaults.soft_limit_percent)
                 .clamp(10, 95),
+            on_branch_complete: toml
+                .on_branch_complete
+                .unwrap_or(defaults.on_branch_complete),
+            recall_timeout_secs: toml
+                .recall_timeout_secs
+                .unwrap_or(defaults.recall_timeout_secs)
+                .max(1),
+            rebuild_overlap_percent: toml
+                .rebuild_overlap_percent
+                .unwrap_or(defaults.rebuild_overlap_percent)
+                .min(100),
+            edit_creates_branch: toml
+                .edit_creates_branch
+                .unwrap_or(defaults.edit_creates_branch),
         }
     }
 }
