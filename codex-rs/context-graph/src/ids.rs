@@ -12,7 +12,8 @@ use serde::Serialize;
 pub struct BlockId(String);
 
 impl BlockId {
-    pub(crate) fn for_item_key(item_key: &str) -> Self {
+    /// The ID of the block whose first item has `item_key`, such as its response item ID.
+    pub fn for_item_key(item_key: &str) -> Self {
         Self(format!("blk_{item_key}"))
     }
 

@@ -225,6 +225,7 @@ pub(crate) fn card(id: &str, kind: BlockKind, turn_id: Option<&str>, title: &str
         claims: Vec::new(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        file_stamps: Vec::new(),
         tokens: 0,
     }
 }
@@ -241,14 +242,29 @@ pub(crate) fn claim(kind: ClaimKind, text: &str) -> Claim {
 pub(crate) struct Fixture {
     pub(crate) cards: Vec<BlockCard>,
     pub(crate) items: Vec<Vec<ResponseItem>>,
+    pub(crate) origins: Vec<Option<String>>,
 }
 
 impl Fixture {
     pub(crate) fn push(&mut self, card: BlockCard, items: Vec<ResponseItem>) -> &mut BlockCard {
         self.cards.push(card);
         self.items.push(items);
+        self.origins.push(None);
         let last = self.cards.len() - 1;
         &mut self.cards[last]
+    }
+
+    /// Adds a block of the referenced branch `origin` after the block at `after`.
+    pub(crate) fn insert_referenced(
+        &mut self,
+        after: usize,
+        origin: &str,
+        card: BlockCard,
+        items: Vec<ResponseItem>,
+    ) {
+        self.cards.insert(after + 1, card);
+        self.items.insert(after + 1, items);
+        self.origins.insert(after + 1, Some(origin.to_string()));
     }
 
     pub(crate) fn history(&self) -> History<'_> {
@@ -256,10 +272,13 @@ impl Fixture {
             self.cards
                 .iter()
                 .zip(&self.items)
-                .map(|(card, items)| HistoryBlock {
+                .zip(&self.origins)
+                .map(|((card, items), origin)| HistoryBlock {
                     card,
                     items,
                     complete: true,
+                    origin: origin.as_deref(),
+                    changed: false,
                 })
                 .collect(),
         )

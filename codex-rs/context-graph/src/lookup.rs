@@ -27,9 +27,9 @@ pub fn search_history(history: &History<'_>, query: &str, limit: usize) -> Strin
             let index = recallable[position];
             let card = history.card(index);
             let mut line = format!(
-                "{} (turn {}, {}): {}",
+                "{} ({}, {}): {}",
                 card.block_id,
-                history.turn(index),
+                place(history, index),
                 kind_name(card.kind),
                 card.title.trim()
             );
@@ -61,7 +61,9 @@ pub fn expand_block(history: &History<'_>, block_id: &str) -> Option<String> {
 /// The text of every block of `turn`, sharing `max_chars` characters.
 pub fn expand_turn(history: &History<'_>, turn: usize, max_chars: usize) -> Option<String> {
     let blocks: Vec<usize> = (0..history.len())
-        .filter(|index| history.turn(*index) == turn && history.recallable(*index))
+        .filter(|index| {
+            history.turn(*index) == turn && history.recallable(*index) && history.is_own(*index)
+        })
         .collect();
     if blocks.is_empty() {
         return None;
@@ -79,9 +81,9 @@ pub fn expand_turn(history: &History<'_>, turn: usize, max_chars: usize) -> Opti
 fn block_text(history: &History<'_>, index: usize, max_chars: usize) -> String {
     let card = history.card(index);
     format!(
-        "## {} (turn {}, {}): {}\n{}",
+        "## {} ({}, {}): {}\n{}",
         card.block_id,
-        history.turn(index),
+        place(history, index),
         kind_name(card.kind),
         card.title.trim(),
         render_block(
@@ -91,6 +93,14 @@ fn block_text(history: &History<'_>, index: usize, max_chars: usize) -> String {
         )
         .trim_end()
     )
+}
+
+/// Where a block sits: its turn, or the referenced branch it comes from.
+fn place(history: &History<'_>, index: usize) -> String {
+    match history.origin(index) {
+        Some(branch) => format!("branch {branch}"),
+        None => format!("turn {}", history.turn(index)),
+    }
 }
 
 #[cfg(test)]

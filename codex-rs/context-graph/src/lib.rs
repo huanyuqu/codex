@@ -12,6 +12,7 @@ mod block;
 pub mod branches;
 pub mod card;
 pub mod card_prompt;
+pub mod episode;
 pub mod extract;
 mod graph;
 pub mod history;
@@ -34,6 +35,7 @@ pub mod view;
 
 pub use block::Block;
 pub use block::BlockKind;
+pub use block::MERGE_ITEM_PREFIX;
 pub use graph::AppendOutcome;
 pub use graph::BlockNode;
 pub use graph::Branch;

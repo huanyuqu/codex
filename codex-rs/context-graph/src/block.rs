@@ -21,7 +21,13 @@ pub enum BlockKind {
     ContextFragment,
     /// A compaction summary or an opaque compaction checkpoint.
     Compaction,
+    /// The note that merged another branch into this one: a summary of the branch's work, or a
+    /// pointer to its history.
+    Merge,
 }
+
+/// Prefix of the item IDs of merge notes, which makes them merge blocks.
+pub const MERGE_ITEM_PREFIX: &str = "cgmerge_";
 
 impl BlockKind {
     /// Whether the harness regenerates this block instead of recalling the recorded copy.

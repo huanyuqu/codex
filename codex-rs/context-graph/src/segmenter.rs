@@ -329,6 +329,11 @@ impl<C: MessageClassifier> Segmenter<C> {
     }
 
     fn role(&self, item: &ResponseItem) -> ItemRole {
+        if let ResponseItem::Message { id: Some(id), .. } = item
+            && id.as_str().starts_with(crate::block::MERGE_ITEM_PREFIX)
+        {
+            return ItemRole::Standalone(BlockKind::Merge);
+        }
         match item {
             ResponseItem::Message {
                 role,

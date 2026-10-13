@@ -134,6 +134,7 @@ fn folding_summarizes_what_the_branch_did_after_it_diverged() {
         &cards,
         &BranchId::new("jitter"),
         &BranchId::new("main"),
+        Since::Unmerged,
     )
     .unwrap_or_else(|err| panic!("fold: {err}"))
     .unwrap_or_else(|| panic!("nothing to fold"));
@@ -159,6 +160,7 @@ fn folding_summarizes_what_the_branch_did_after_it_diverged() {
         &cards,
         &BranchId::new("main"),
         &BranchId::new("jitter"),
+        Since::Unmerged,
     )
     .unwrap_or_else(|err| panic!("fold: {err}"));
     assert_eq!(back.map(|fold| fold.turns), Some(1));

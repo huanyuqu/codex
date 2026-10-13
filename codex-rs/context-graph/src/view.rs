@@ -17,6 +17,7 @@ use serde::Serialize;
 use crate::BlockId;
 use crate::BlockKind;
 use crate::card::ClaimKind;
+use crate::history::EpisodeSpan;
 use crate::history::History;
 use crate::text::block_lines;
 use crate::text::estimate_tokens;
@@ -103,6 +104,9 @@ pub struct ViewEntry {
     /// The block that made this one outdated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<BlockId>,
+    /// Whether a file this block read has changed since, which makes it outdated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub file_changed: bool,
     pub tokens: u32,
 }
 
@@ -179,10 +183,13 @@ pub fn plan_view(history: &History<'_>, picks: &[Pick], limits: ViewLimits) -> C
         reason,
         note: None,
         superseded_by: None,
+        file_changed: false,
         tokens: 0,
     };
 
-    for index in (recent_start..history.len()).filter(|index| history.recallable(*index)) {
+    for index in (recent_start..history.len())
+        .filter(|index| history.recallable(*index) && history.is_own(*index))
+    {
         entries.insert(index, entry(index, Presentation::Full, Reason::Recent));
     }
     if let Some(task) = history.task_start().filter(|task| *task < recent_start) {
@@ -194,7 +201,7 @@ pub fn plan_view(history: &History<'_>, picks: &[Pick], limits: ViewLimits) -> C
         entries.insert(task, entry(task, presentation, Reason::TaskStart));
     }
     for pick in picks {
-        if pick.index >= recent_start || !history.recallable(pick.index) {
+        if history.is_recent(pick.index, recent_start) || !history.recallable(pick.index) {
             continue;
         }
         match entries.get_mut(&pick.index) {
@@ -219,7 +226,7 @@ pub fn plan_view(history: &History<'_>, picks: &[Pick], limits: ViewLimits) -> C
             let Some(dependency) = history.position(dependency) else {
                 continue;
             };
-            if dependency < recent_start
+            if !history.is_recent(dependency, recent_start)
                 && history.recallable(dependency)
                 && !entries.contains_key(&dependency)
             {
@@ -236,7 +243,7 @@ pub fn plan_view(history: &History<'_>, picks: &[Pick], limits: ViewLimits) -> C
     let superseded_by = superseded_by(history);
     let outdated: Vec<(usize, usize)> = entries
         .keys()
-        .filter(|index| **index < recent_start)
+        .filter(|index| !history.is_recent(**index, recent_start))
         .filter_map(|index| Some((*index, *superseded_by.get(index)?)))
         .collect();
     for (index, successor) in outdated {
@@ -250,6 +257,14 @@ pub fn plan_view(history: &History<'_>, picks: &[Pick], limits: ViewLimits) -> C
                 entry(successor, Presentation::Summary, Reason::Successor),
             );
             priority.push(successor);
+        }
+    }
+
+    // A block whose files changed since it read them is summarized, like an outdated one.
+    for (index, entry) in &mut entries {
+        if !history.is_recent(*index, recent_start) && history.changed(*index) {
+            entry.file_changed = true;
+            entry.presentation = Presentation::Summary;
         }
     }
 
@@ -307,7 +322,9 @@ fn ledger(
     max_tokens: u32,
 ) -> Vec<LedgerClaim> {
     let mut claims: Vec<LedgerClaim> = Vec::new();
-    for index in (0..recent_start).filter(|index| history.recallable(*index)) {
+    for index in
+        (0..recent_start).filter(|index| history.recallable(*index) && history.is_own(*index))
+    {
         for claim in &history.card(index).claims {
             let keep = match claim.kind {
                 ClaimKind::UserConstraint => true,
@@ -395,7 +412,9 @@ fn fit_budget(history: &History<'_>, view: &mut ContextView, priority: &[usize])
 /// its blocks the view shows.
 fn turn_map(history: &History<'_>, view: &ContextView, max_turns: usize) -> Vec<String> {
     let mut turns: BTreeMap<usize, (Option<usize>, Option<usize>, usize)> = BTreeMap::new();
-    for index in (0..view.recent_start).filter(|index| history.recallable(*index)) {
+    for index in
+        (0..view.recent_start).filter(|index| history.recallable(*index) && history.is_own(*index))
+    {
         let turn = turns.entry(history.turn(index)).or_default();
         match history.card(index).kind {
             BlockKind::UserMessage if turn.0.is_none() => turn.0 = Some(index),
@@ -405,6 +424,7 @@ fn turn_map(history: &History<'_>, view: &ContextView, max_turns: usize) -> Vec<
     }
     for entry in &view.entries {
         if entry.index < view.recent_start
+            && history.is_own(entry.index)
             && let Some(turn) = turns.get_mut(&history.turn(entry.index))
         {
             turn.2 += 1;
@@ -416,29 +436,93 @@ fn turn_map(history: &History<'_>, view: &ContextView, max_turns: usize) -> Vec<
             |index| truncate(&history.card(index).title, MAP_TITLE_CHARS),
         )
     };
-    let lines: Vec<String> = turns
+    let rows: Vec<(usize, usize, String)> = turns
         .into_iter()
         .map(|(turn, (request, result, shown))| {
-            let shown = if shown > 0 {
-                format!(" [{shown} shown below]")
+            let line = if shown > 0 {
+                format!(
+                    "turn {turn}: {} → {} [{shown} shown below]",
+                    title(request),
+                    title(result)
+                )
             } else {
-                String::new()
+                format!("turn {turn}: {} → {}", title(request), title(result))
             };
-            format!("turn {turn}: {} → {}{shown}", title(request), title(result))
+            (turn, shown, line)
         })
         .collect();
-    if lines.len() <= max_turns {
-        return lines;
+    if rows.len() <= max_turns {
+        return rows.into_iter().map(|(_, _, line)| line).collect();
+    }
+    let lines = with_episodes(history, &rows);
+    // A cut map has a line for the turns it leaves out, so summed-up episodes may take it.
+    if lines.len() <= max_turns + 1 && lines.len() < rows.len() {
+        return lines.into_iter().map(|(_, line)| line).collect();
     }
     let head = MAP_HEAD_TURNS.min(max_turns);
     let tail = max_turns - head;
-    let mut cut = lines[..head].to_vec();
-    cut.push(format!(
-        "… {} turns not listed …",
-        lines.len() - head - tail
-    ));
-    cut.extend_from_slice(&lines[lines.len() - tail..]);
+    let left_out: usize = lines[head..lines.len() - tail]
+        .iter()
+        .map(|(turns, _)| turns)
+        .sum();
+    let mut cut: Vec<String> = lines[..head].iter().map(|(_, line)| line.clone()).collect();
+    cut.push(format!("… {left_out} turns not listed …"));
+    cut.extend(
+        lines[lines.len() - tail..]
+            .iter()
+            .map(|(_, line)| line.clone()),
+    );
     cut
+}
+
+/// The map lines of `rows` (turn, blocks shown, line) after the first few, with the turns of
+/// each episode whose blocks the view does not show summed up in one line, and how many turns
+/// each line covers.
+fn with_episodes(history: &History<'_>, rows: &[(usize, usize, String)]) -> Vec<(usize, String)> {
+    let head = MAP_HEAD_TURNS.min(rows.len());
+    let shown: BTreeMap<usize, usize> = rows
+        .iter()
+        .map(|(turn, shown, _)| (*turn, *shown))
+        .collect();
+    let first_turn = rows.get(head).map_or(usize::MAX, |(turn, _, _)| *turn);
+    let episodes: Vec<&EpisodeSpan> = history
+        .episodes()
+        .iter()
+        .filter(|episode| episode.first_turn >= first_turn)
+        .filter(|episode| {
+            shown
+                .range(episode.first_turn..=episode.last_turn)
+                .all(|(_, shown)| *shown == 0)
+        })
+        .collect();
+    let mut lines: Vec<(usize, String)> = rows[..head]
+        .iter()
+        .map(|(_, _, line)| (1, line.clone()))
+        .collect();
+    let mut row = head;
+    while row < rows.len() {
+        let turn = rows[row].0;
+        if let Some(episode) = episodes.iter().find(|episode| episode.first_turn == turn) {
+            let start = row;
+            while row < rows.len() && rows[row].0 <= episode.last_turn {
+                row += 1;
+            }
+            lines.push((
+                row - start,
+                format!(
+                    "turns {}–{}: {} — {}",
+                    episode.first_turn,
+                    episode.last_turn,
+                    truncate(&episode.title, MAP_TITLE_CHARS),
+                    truncate(&episode.summary, 2 * MAP_TITLE_CHARS)
+                ),
+            ));
+            continue;
+        }
+        lines.push((1, rows[row].2.clone()));
+        row += 1;
+    }
+    lines
 }
 
 /// The lines of `items` that `ranges` name, with a marker where lines are skipped.
@@ -486,8 +570,10 @@ pub fn render_view(
     let mut notes = String::new();
     for entry in &view.entries {
         let block = history.block(entry.index);
-        let recent = entry.index >= view.recent_start;
-        if entry.presentation == Presentation::Full && block.complete {
+        let recent = history.is_recent(entry.index, view.recent_start);
+        // Referenced blocks belong to another thread's history, so they are shown as text.
+        if entry.presentation == Presentation::Full && block.complete && history.is_own(entry.index)
+        {
             flush_notes(&mut notes, &mut items);
             let keep_reasoning = recent && options.keep_recent_reasoning;
             items.extend(
@@ -555,12 +641,19 @@ pub fn render_transcript(history: &History<'_>, view: &ContextView) -> String {
 pub fn entry_text(history: &History<'_>, entry: &ViewEntry) -> String {
     let block = history.block(entry.index);
     let card = block.card;
-    let mut text = format!(
-        "[turn {} · {}] {}",
-        history.turn(entry.index),
-        kind_label(card.kind),
-        card.title
-    );
+    let mut text = match history.origin(entry.index) {
+        Some(branch) => format!(
+            "[branch {branch} · {}] {}",
+            kind_label(card.kind),
+            card.title
+        ),
+        None => format!(
+            "[turn {} · {}] {}",
+            history.turn(entry.index),
+            kind_label(card.kind),
+            card.title
+        ),
+    };
     if let Some(successor) = entry
         .superseded_by
         .as_ref()
@@ -571,6 +664,9 @@ pub fn entry_text(history: &History<'_>, entry: &ViewEntry) -> String {
             history.turn(successor),
             truncate(&history.card(successor).title, MAP_TITLE_CHARS)
         ));
+    }
+    if entry.file_changed {
+        text.push_str(" (outdated: a file it read has changed since)");
     }
     match &entry.presentation {
         Presentation::Summary => {
@@ -600,6 +696,7 @@ fn kind_label(kind: BlockKind) -> &'static str {
         BlockKind::Reasoning => "reasoning",
         BlockKind::ContextFragment => "context",
         BlockKind::Compaction => "compaction",
+        BlockKind::Merge => "merge",
     }
 }
 

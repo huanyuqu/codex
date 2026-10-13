@@ -284,3 +284,146 @@ fn the_tools_hint_follows_the_preamble() {
          turn with `context_expand`."
     ));
 }
+
+#[test]
+fn referenced_blocks_are_shown_only_when_picked_and_as_text() {
+    let mut session = retry_session();
+    let u4 = session.index("u4");
+    session.insert_referenced(
+        u4,
+        "jitter",
+        crate::test_support::card("j1", BlockKind::AssistantMessage, None, "jitter works"),
+        vec![crate::test_support::assistant(
+            "j1",
+            "Full jitter passed every test.",
+        )],
+    );
+    let history = session.history();
+
+    let unpicked = plan_view(&history, &[], limits(1));
+    assert!(!unpicked.shows(session.index("j1")));
+
+    let view = plan_view(
+        &history,
+        &[pick(&session, "j1", Presentation::Full)],
+        limits(1),
+    );
+    assert_eq!(
+        shown(&view)[1..],
+        [
+            ("u4", Presentation::Full, Reason::Recent),
+            ("j1", Presentation::Full, Reason::Selected),
+        ]
+    );
+    let items: Vec<String> = render_view(&history, &view, RenderOptions::default())
+        .iter()
+        .map(text)
+        .collect();
+    assert_eq!(
+        items[2..],
+        [
+            "user: Why did the test fail?".to_string(),
+            "developer: Recalled from earlier turns:\n\n[branch jitter · assistant] jitter \
+             works\n[assistant]\nFull jitter passed every test."
+                .to_string(),
+        ]
+    );
+}
+
+#[test]
+fn blocks_whose_files_changed_are_summarized_and_marked() {
+    let session = retry_session();
+    let mut history_blocks = session.history().blocks().to_vec();
+    let r1 = session.index("r1");
+    history_blocks[r1].changed = true;
+    let history = crate::history::History::new(history_blocks);
+    let view = plan_view(
+        &history,
+        &[pick(&session, "r1", Presentation::Full)],
+        limits(1),
+    );
+    let entry = view
+        .entries
+        .iter()
+        .find(|entry| entry.index == r1)
+        .unwrap_or_else(|| panic!("r1 not shown"));
+    assert_eq!(
+        (entry.presentation.clone(), entry.file_changed),
+        (Presentation::Summary, true)
+    );
+    assert!(entry_text(&history, entry).contains("(outdated: a file it read has changed since)"));
+}
+
+#[test]
+fn long_maps_sum_up_episodes_the_view_does_not_show() {
+    use crate::BlockKind;
+    use crate::episode::EpisodeCard;
+    use crate::test_support::card;
+
+    let mut session = Fixture::default();
+    for turn in 1..=20 {
+        session.push(
+            card(
+                &format!("u{turn}"),
+                BlockKind::UserMessage,
+                None,
+                &format!("request {turn}"),
+            ),
+            Vec::new(),
+        );
+        session.push(
+            card(
+                &format!("a{turn}"),
+                BlockKind::AssistantMessage,
+                None,
+                &format!("result {turn}"),
+            ),
+            Vec::new(),
+        );
+    }
+    let episode = |first: usize, last: usize, title: &str| EpisodeCard {
+        first_block: BlockId::from_stored(format!("u{first}")),
+        last_block: BlockId::from_stored(format!("u{last}")),
+        turns: last - first + 1,
+        indexer: "test".to_string(),
+        title: title.to_string(),
+        summary: format!("{title} done"),
+    };
+    let episodes = [episode(6, 10, "retries"), episode(11, 16, "docs")];
+    let history = session.history().with_episodes(&episodes);
+    let limits = ViewLimits {
+        recent_turns: 1,
+        max_map_turns: 10,
+        ..ViewLimits::default()
+    };
+
+    // Turns 1 to 19 are mapped; the two episodes leave 10 lines.
+    let view = plan_view(&history, &[], limits);
+    assert_eq!(
+        view.map[4..8],
+        [
+            "turn 5: request 5 → result 5".to_string(),
+            "turns 6–10: retries — retries done".to_string(),
+            "turns 11–16: docs — docs done".to_string(),
+            "turn 17: request 17 → result 17".to_string(),
+        ]
+    );
+    assert_eq!(view.map.len(), 10);
+
+    // A turn whose block the view shows is listed on its own, and its episode is not summed up.
+    let picked = plan_view(
+        &history,
+        &[pick(&session, "a8", Presentation::Full)],
+        limits,
+    );
+    assert!(picked.map.iter().all(|line| !line.contains("retries")));
+    assert!(
+        picked
+            .map
+            .iter()
+            .any(|line| line.starts_with("turns 11–16: docs"))
+    );
+    // Still too long for the map, so the middle is cut, counting the turns left out.
+    assert_eq!(picked.map.len(), 11);
+    assert_eq!(picked.map[5], "… 4 turns not listed …");
+}

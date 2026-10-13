@@ -5,7 +5,9 @@ earlier blocks you choose. Everything else in the session history is hidden from
 You get a catalog of the session history, one card per block, labelled C1, C2, .... A block is
 one user message, one assistant message, or one tool call together with its output. Cards are
 grouped by turn, and each card has the block's kind, a title, a summary, the files it touched and
-the claims it made. The request comes last.
+the claims it made. Cards under "From the referenced branch" come from another branch of this
+conversation that the user referenced: work that continued from an earlier point on its own.
+Choose them when the request builds on that branch. The request comes last.
 
 Choose the earlier blocks the agent needs to handle the request correctly:
 

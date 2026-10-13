@@ -92,13 +92,19 @@ pub fn build_screen_prompt(
     };
 
     let mut input = String::from("## History\n");
-    let mut turn = None;
+    let mut group = None;
     let mut catalog_tokens = 0;
     for (label, candidate) in candidates.iter().enumerate() {
         let index = recallable[*candidate];
-        if turn != Some(history.turn(index)) {
-            turn = Some(history.turn(index));
-            input.push_str(&format!("### Turn {}\n", history.turn(index)));
+        let key = (history.origin(index), history.turn(index));
+        if group != Some(key) {
+            group = Some(key);
+            match key {
+                (Some(branch), _) => {
+                    input.push_str(&format!("### From the referenced branch \"{branch}\"\n"));
+                }
+                (None, turn) => input.push_str(&format!("### Turn {turn}\n")),
+            }
         }
         input.push_str(&format!("C{} {}\n", label + 1, lines[*candidate]));
         catalog_tokens += line_tokens[*candidate];
@@ -223,6 +229,7 @@ fn kind_name(kind: BlockKind) -> &'static str {
         BlockKind::Reasoning => "reasoning",
         BlockKind::ContextFragment => "context",
         BlockKind::Compaction => "compaction",
+        BlockKind::Merge => "merge",
     }
 }
 

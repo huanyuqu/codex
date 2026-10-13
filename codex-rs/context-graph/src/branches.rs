@@ -118,6 +118,15 @@ pub struct FoldSummary {
     pub blocks: usize,
 }
 
+/// Which of a branch's work a summary covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Since {
+    /// What the target lacks: work merged into it before is left out.
+    Unmerged,
+    /// Everything since the branch left the target's history, merged before or not.
+    Fork,
+}
+
 /// Summarizes the work `source` did after it diverged from `target`, from the cards of its
 /// blocks, or returns `None` when it did nothing `target` lacks.
 pub fn fold_summary(
@@ -125,6 +134,7 @@ pub fn fold_summary(
     cards: &HashMap<BlockId, BlockCard>,
     source: &BranchId,
     target: &BranchId,
+    since: Since,
 ) -> Result<Option<FoldSummary>, GraphError> {
     let source_branch = graph
         .branch(source)
@@ -132,17 +142,28 @@ pub fn fold_summary(
     let target_branch = graph
         .branch(target)
         .ok_or_else(|| GraphError::UnknownBranch(target.clone()))?;
-    let base = match (&source_branch.head, &target_branch.head) {
-        (Some(source_head), Some(target_head)) => graph.merge_base(source_head, target_head)?,
+    let base = match (&source_branch.head, &target_branch.head, since) {
+        (Some(source_head), Some(target_head), Since::Unmerged) => {
+            graph.merge_base(source_head, target_head)?
+        }
+        // The last block of the source's own history that the target's history also holds.
+        (Some(source_head), Some(target_head), Since::Fork) => {
+            let target_path: HashSet<BlockId> =
+                graph.primary_path(target_head)?.into_iter().collect();
+            graph
+                .primary_path(source_head)?
+                .into_iter()
+                .take_while(|id| target_path.contains(id))
+                .last()
+        }
         _ => None,
     };
-    let own: Vec<&BlockCard> = own_blocks(graph, source_branch, base.as_ref())
-        .iter()
-        .filter_map(|id| cards.get(id))
-        .collect();
-    if own.is_empty() {
+    let own_ids = own_blocks(graph, source_branch, base.as_ref());
+    if own_ids.is_empty() {
         return Ok(None);
     }
+    // Blocks the indexer has not reached yet have no card; the summary leaves them out.
+    let own: Vec<&BlockCard> = own_ids.iter().filter_map(|id| cards.get(id)).collect();
 
     // Turns: each request with the last answer that followed it.
     let mut turns: Vec<(Option<&BlockCard>, Option<&BlockCard>)> = Vec::new();
@@ -209,10 +230,18 @@ pub fn fold_summary(
         text.push_str(&truncate(&card_text(outcome), OUTCOME_CHARS));
         text.push('\n');
     }
+    if own.len() < own_ids.len() {
+        text.push_str(&format!(
+            "\n{} of its {} blocks are not summarized yet; context_search and context_expand can \
+             read them once the branch is referenced.\n",
+            own_ids.len() - own.len(),
+            own_ids.len()
+        ));
+    }
     Ok(Some(FoldSummary {
         text: text.trim_end().to_string(),
         turns: turns.len(),
-        blocks: own.len(),
+        blocks: own_ids.len(),
     }))
 }
 

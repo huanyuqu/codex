@@ -85,11 +85,14 @@ fn read_prompt(
     let mut line_counts = Vec::new();
     for (label, (index, lines)) in batch.into_iter().enumerate() {
         let card = history.card(index);
+        let place = match history.origin(index) {
+            Some(branch) => format!("branch {branch}"),
+            None => format!("turn {}", history.turn(index)),
+        };
         input.push_str(&format!(
-            "\n### R{} [{}] turn {}: {}\n",
+            "\n### R{} [{}] {place}: {}\n",
             label + 1,
             crate::render::kind_name(card.kind),
-            history.turn(index),
             card.title.trim()
         ));
         for (number, line) in lines.iter().enumerate() {

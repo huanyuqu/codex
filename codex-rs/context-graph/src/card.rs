@@ -20,7 +20,7 @@ use crate::text::item_text;
 use crate::text::truncate;
 
 /// Version of the card schema and prompts. Cards written by an older version are rebuilt.
-pub const CARD_VERSION: u32 = 1;
+pub const CARD_VERSION: u32 = 2;
 
 /// The indexer name of cards built without a model.
 pub const EXTRACTED_INDEXER: &str = "extract";
@@ -41,6 +41,16 @@ pub enum ClaimKind {
     /// Work that is planned or still open.
     Todo,
     OpenQuestion,
+}
+
+/// A file a block read, as it was when the block was recorded, so recall can tell that it
+/// changed since.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileStamp {
+    pub path: String,
+    /// Last modification, in milliseconds since the Unix epoch.
+    pub modified_ms: u64,
+    pub len: u64,
 }
 
 /// A statement a block makes that later work may depend on.
@@ -78,6 +88,9 @@ pub struct BlockCard {
     /// Earlier blocks this block makes stale, such as an older read of a file it changed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supersedes: Vec<BlockId>,
+    /// The files the block read, as they were then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_stamps: Vec<FileStamp>,
     pub tokens: u32,
 }
 
@@ -100,6 +113,7 @@ impl BlockCard {
             claims: Vec::new(),
             depends_on: Vec::new(),
             supersedes: Vec::new(),
+            file_stamps: Vec::new(),
             tokens: facts.tokens,
         }
     }
@@ -110,6 +124,8 @@ impl BlockCard {
         match self.kind {
             BlockKind::ContextFragment | BlockKind::Reasoning => false,
             BlockKind::Compaction => !self.summary.is_empty(),
+            // A merge note is itself a summary written for the model.
+            BlockKind::Merge => false,
             _ => true,
         }
     }

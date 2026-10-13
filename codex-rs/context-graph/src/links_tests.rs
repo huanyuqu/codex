@@ -28,6 +28,7 @@ fn tool(id: &str, read: &[&str], written: &[&str], command: Option<i32>) -> Bloc
         claims: Vec::new(),
         depends_on: Vec::new(),
         supersedes: Vec::new(),
+        file_stamps: Vec::new(),
         tokens: 1,
     }
 }

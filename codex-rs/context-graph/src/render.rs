@@ -75,6 +75,7 @@ pub fn kind_name(kind: BlockKind) -> &'static str {
         BlockKind::InterAgentMessage => "inter_agent_message",
         BlockKind::ContextFragment => "context_fragment",
         BlockKind::Compaction => "compaction",
+        BlockKind::Merge => "merge",
     }
 }
 
