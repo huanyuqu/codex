@@ -13,16 +13,22 @@ pub mod card;
 pub mod card_prompt;
 pub mod extract;
 mod graph;
+pub mod history;
 mod ids;
 mod index;
 pub mod links;
+pub mod prompt;
+pub mod read;
 pub mod render;
 mod replay;
+pub mod screen;
+pub mod search;
 mod segmenter;
 #[cfg(test)]
 mod test_support;
 pub mod text;
 pub mod turn;
+pub mod view;
 
 pub use block::Block;
 pub use block::BlockKind;

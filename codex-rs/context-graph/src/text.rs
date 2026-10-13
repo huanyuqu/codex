@@ -172,6 +172,20 @@ pub fn render_block(
     rendered
 }
 
+/// Characters of one item that close reading and excerpts see.
+pub const READ_ITEM_CHARS: usize = 8_000;
+/// Characters of one block that close reading and excerpts see.
+pub const READ_BLOCK_CHARS: usize = 16_000;
+
+/// The lines of a block's rendering for close reading. Excerpts name lines of this rendering,
+/// counted from 1, so it must stay deterministic.
+pub fn block_lines(items: &[ResponseItem]) -> Vec<String> {
+    render_block(items, READ_ITEM_CHARS, READ_BLOCK_CHARS)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 /// Keeps roughly the first 60% and last 40% of `text` within `max_chars` characters.
 pub fn head_and_tail(text: &str, max_chars: usize) -> String {
     let total = text.chars().count();
@@ -194,6 +208,19 @@ pub fn head_and_tail(text: &str, max_chars: usize) -> String {
 pub fn first_line(text: &str, max_chars: usize) -> String {
     let line = text.lines().map(str::trim).find(|line| !line.is_empty());
     truncate(line.unwrap_or_default(), max_chars)
+}
+
+/// Rough token count of `text`: about four ASCII characters per token, and a little under one
+/// token per character of other scripts, such as Chinese.
+pub fn estimate_tokens(text: &str) -> u32 {
+    let (ascii, other) = text.chars().fold((0usize, 0usize), |(ascii, other), ch| {
+        if ch.is_ascii() {
+            (ascii + 1, other)
+        } else {
+            (ascii, other + 1)
+        }
+    });
+    u32::try_from(ascii.div_ceil(4) + (other * 4).div_ceil(5)).unwrap_or(u32::MAX)
 }
 
 /// `text` cut to `max_chars` characters with an ellipsis.

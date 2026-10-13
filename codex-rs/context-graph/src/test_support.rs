@@ -13,6 +13,17 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 
+use crate::BlockId;
+use crate::BlockKind;
+use crate::card::BlockCard;
+use crate::card::CARD_VERSION;
+use crate::card::Claim;
+use crate::card::ClaimKind;
+use crate::extract::BlockEntities;
+use crate::extract::Outcome;
+use crate::history::History;
+use crate::history::HistoryBlock;
+
 fn id(value: &str) -> Option<ResponseItemId> {
     Some(ResponseItemId::from_server(value.to_string()))
 }
@@ -195,4 +206,220 @@ pub(crate) fn user_with_kinds(item_id: &str, text: &str, kinds: &[&str]) -> Resp
             });
     }
     item
+}
+
+/// A card with only the fields recall tests look at.
+pub(crate) fn card(id: &str, kind: BlockKind, turn_id: Option<&str>, title: &str) -> BlockCard {
+    BlockCard {
+        block_id: BlockId::from_stored(id),
+        kind,
+        turn_id: turn_id.map(str::to_string),
+        card_version: CARD_VERSION,
+        indexer: "test".to_string(),
+        title: title.to_string(),
+        summary: format!("summary of {title}"),
+        entities: BlockEntities::default(),
+        tools: Vec::new(),
+        outcome: None,
+        exit_code: None,
+        claims: Vec::new(),
+        depends_on: Vec::new(),
+        supersedes: Vec::new(),
+        tokens: 0,
+    }
+}
+
+pub(crate) fn claim(kind: ClaimKind, text: &str) -> Claim {
+    Claim {
+        kind,
+        text: text.to_string(),
+    }
+}
+
+/// Cards and items of a session, for building a [`History`].
+#[derive(Default)]
+pub(crate) struct Fixture {
+    pub(crate) cards: Vec<BlockCard>,
+    pub(crate) items: Vec<Vec<ResponseItem>>,
+}
+
+impl Fixture {
+    pub(crate) fn push(&mut self, card: BlockCard, items: Vec<ResponseItem>) -> &mut BlockCard {
+        self.cards.push(card);
+        self.items.push(items);
+        let last = self.cards.len() - 1;
+        &mut self.cards[last]
+    }
+
+    pub(crate) fn history(&self) -> History<'_> {
+        History::new(
+            self.cards
+                .iter()
+                .zip(&self.items)
+                .map(|(card, items)| HistoryBlock {
+                    card,
+                    items,
+                    complete: true,
+                })
+                .collect(),
+        )
+    }
+
+    pub(crate) fn index(&self, id: &str) -> usize {
+        self.cards
+            .iter()
+            .position(|card| card.block_id.as_str() == id)
+            .unwrap_or_else(|| panic!("no block {id}"))
+    }
+}
+
+/// Four turns of a session that adds retries to an HTTP client:
+///
+/// - `ctx`: harness context before the first turn;
+/// - turn 1: `u1` asks for retries and sets a constraint, `r1` reads the client, `a1` decides on
+///   exponential backoff;
+/// - turn 2: `u2` asks for a fixed delay, `a2` decides so and supersedes `a1`, `e2` edits the
+///   client and supersedes `r1`;
+/// - turn 3: `u3` asks to run the tests, `t3` runs them and fails, `a3` reports it;
+/// - turn 4: `u4` asks why the test failed.
+pub(crate) fn retry_session() -> Fixture {
+    let mut fixture = Fixture::default();
+    fixture.push(
+        card(
+            "ctx",
+            BlockKind::ContextFragment,
+            None,
+            "environment context",
+        ),
+        vec![developer(
+            "ctx",
+            "<environment_context>cwd=/repo</environment_context>",
+        )],
+    );
+    fixture
+        .push(
+            card(
+                "u1",
+                BlockKind::UserMessage,
+                Some("t1"),
+                "add retries to the HTTP client",
+            ),
+            vec![user(
+                "u1",
+                "Add retries to the HTTP client. Do not change the public API.",
+            )],
+        )
+        .claims = vec![claim(
+        ClaimKind::UserConstraint,
+        "Do not change the public API",
+    )];
+    fixture
+        .push(
+            card(
+                "r1",
+                BlockKind::ToolExchange,
+                Some("t1"),
+                "$ cat src/client.rs",
+            ),
+            vec![
+                exec("r1", "c1", r#"{"cmd":"cat src/client.rs"}"#),
+                output_text(
+                    "r1o",
+                    "c1",
+                    "pub fn send(request: Request) -> Response {\n    transport.send(request)\n}",
+                ),
+            ],
+        )
+        .entities
+        .files_read = vec!["src/client.rs".to_string()];
+    fixture
+        .push(
+            card(
+                "a1",
+                BlockKind::AssistantMessage,
+                Some("t1"),
+                "plan: exponential backoff",
+            ),
+            vec![
+                reasoning("a1r"),
+                assistant("a1", "I will retry send() with exponential backoff."),
+            ],
+        )
+        .claims = vec![claim(ClaimKind::Decision, "Retry with exponential backoff")];
+    fixture.push(
+        card(
+            "u2",
+            BlockKind::UserMessage,
+            Some("t2"),
+            "use a fixed delay instead",
+        ),
+        vec![user("u2", "Use a fixed delay instead.")],
+    );
+    let a2 = fixture.push(
+        card(
+            "a2",
+            BlockKind::AssistantMessage,
+            Some("t2"),
+            "switch to a fixed delay",
+        ),
+        vec![assistant("a2", "Switched to a fixed 100 ms delay.")],
+    );
+    a2.claims = vec![claim(
+        ClaimKind::Decision,
+        "Retry with a fixed 100 ms delay",
+    )];
+    a2.supersedes = vec![BlockId::from_stored("a1")];
+    let e2 = fixture.push(
+        card("e2", BlockKind::ToolExchange, Some("t2"), "edit client.rs"),
+        vec![
+            custom_call(
+                "e2",
+                "c2",
+                "apply_patch",
+                "*** Update File: src/client.rs\n+    retry(|| transport.send(request))",
+            ),
+            custom_output("e2o", "c2", "Success"),
+        ],
+    );
+    e2.entities.files_written = vec!["src/client.rs".to_string()];
+    e2.supersedes = vec![BlockId::from_stored("r1")];
+    fixture.push(
+        card("u3", BlockKind::UserMessage, Some("t3"), "run the tests"),
+        vec![user("u3", "Run the tests.")],
+    );
+    let t3 = fixture.push(
+        card("t3", BlockKind::ToolExchange, Some("t3"), "$ cargo test"),
+        vec![
+            exec("t3", "c3", r#"{"cmd":"cargo test"}"#),
+            output_text(
+                "t3o",
+                "c3",
+                "running 4 tests\ntest send_ok ... ok\ntest retry_fixed ... ok\ntest retry_limit ... FAILED\nexpected 3 attempts, got 4\ntest timeout ... ok",
+            ),
+        ],
+    );
+    t3.outcome = Some(Outcome::Failure);
+    t3.depends_on = vec![BlockId::from_stored("e2")];
+    fixture.push(
+        card(
+            "a3",
+            BlockKind::AssistantMessage,
+            Some("t3"),
+            "retry_limit fails",
+        ),
+        vec![assistant(
+            "a3",
+            "retry_limit fails: 4 attempts instead of 3.",
+        )],
+    );
+    fixture.push(
+        card(
+            "u4",
+            BlockKind::UserMessage,
+            Some("t4"),
+            "why did the test fail",
+        ),
+        vec![user("u4", "Why did the test fail?")],
+    );
+    fixture
 }

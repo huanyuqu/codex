@@ -68,7 +68,7 @@ fn prompts_list_the_catalog_then_the_batch() {
     let fixture = fixture();
     let prompt = prompt(&fixture);
     assert_eq!(
-        prompt.input,
+        prompt.prompt.input,
         "## Earlier blocks\nE1 [user_message] use sqlite\n\n## Blocks to index\n\n### B1 [user_message]\n[user]\nadd retries to the client\n\n### B2 [tool_exchange]\nfacts: exit code 0\n[tool call exec_command]\n{\"cmd\":\"cargo test -p client\"}\n[tool output]\nProcess exited with code 0\n12 passed\n"
     );
     assert_eq!(
@@ -77,9 +77,9 @@ fn prompts_list_the_catalog_then_the_batch() {
     );
     assert_eq!(prompt.linkable.len(), 3);
     assert_eq!(prompt.labels, vec!["E1", "B1", "B2"]);
-    assert!(prompt.instructions.contains("user_constraint"));
+    assert!(prompt.prompt.instructions.contains("user_constraint"));
     assert_eq!(
-        prompt.schema["properties"]["cards"]["items"]["required"],
+        prompt.prompt.schema["properties"]["cards"]["items"]["required"],
         json!([
             "block_id",
             "title",

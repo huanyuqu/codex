@@ -214,7 +214,7 @@ impl LocalContextGraphStore {
     }
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| to_i64(elapsed.as_secs()))

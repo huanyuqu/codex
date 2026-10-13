@@ -15,6 +15,8 @@ use crate::card::BlockCard;
 use crate::card::Claim;
 use crate::card::ClaimKind;
 use crate::card::Relation;
+use crate::prompt::ModelPrompt;
+use crate::prompt::strip_code_fence;
 use crate::text::render_block;
 use crate::text::truncate;
 
@@ -47,10 +49,7 @@ impl Default for PromptLimits {
 /// A rendered indexing request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CardPrompt {
-    pub instructions: String,
-    pub input: String,
-    /// JSON schema of the answer, for structured output.
-    pub schema: Value,
+    pub prompt: ModelPrompt,
     /// Blocks the answer must describe, in order.
     pub batch: Vec<BlockId>,
     /// Blocks the answer may link to: the catalog and the batch.
@@ -108,9 +107,12 @@ pub fn build_card_prompt(
         .chain(batch_ids.iter().cloned())
         .collect();
     CardPrompt {
-        instructions: INSTRUCTIONS.to_string(),
-        input,
-        schema: answer_schema(),
+        prompt: ModelPrompt {
+            instructions: INSTRUCTIONS.to_string(),
+            input,
+            schema_name: "index_cards",
+            schema: answer_schema(),
+        },
         batch: batch_ids,
         linkable,
         labels,
@@ -315,15 +317,6 @@ pub fn parse_card_answer(prompt: &CardPrompt, text: &str) -> Result<CardAnswer, 
         return Err(CardParseError::Empty);
     }
     Ok(CardAnswer { cards, missing })
-}
-
-fn strip_code_fence(text: &str) -> &str {
-    let text = text.trim();
-    let Some(rest) = text.strip_prefix("```") else {
-        return text;
-    };
-    let rest = rest.strip_prefix("json").unwrap_or(rest);
-    rest.strip_suffix("```").unwrap_or(rest).trim()
 }
 
 #[cfg(test)]

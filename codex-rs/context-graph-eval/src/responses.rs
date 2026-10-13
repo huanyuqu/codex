@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use anyhow::Context as _;
-use codex_context_graph::card_prompt::CardPrompt;
-use codex_context_graph_store::CardCompletion;
-use codex_context_graph_store::CardModel;
+use codex_context_graph::prompt::ModelPrompt;
+use codex_context_graph_store::ModelCompletion;
+use codex_context_graph_store::ShadowModel;
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::Value;
@@ -69,7 +69,7 @@ impl ResponsesModel {
         input: &str,
         schema_name: &str,
         schema: &Value,
-    ) -> anyhow::Result<CardCompletion> {
+    ) -> anyhow::Result<ModelCompletion> {
         let mut body = json!({
             "model": self.model,
             "instructions": instructions,
@@ -128,7 +128,7 @@ impl ResponsesModel {
 }
 
 /// Collects the output text and usage of a Responses API answer.
-pub fn parse_response(text: &str) -> anyhow::Result<CardCompletion> {
+pub fn parse_response(text: &str) -> anyhow::Result<ModelCompletion> {
     let body: ResponseBody =
         serde_json::from_str(text).context("Responses answer is not a response object")?;
     // The answer is the last message; a model may comment in messages before it.
@@ -156,7 +156,7 @@ pub fn parse_response(text: &str) -> anyhow::Result<CardCompletion> {
     }
     anyhow::ensure!(!output.is_empty(), "Responses answer has no output text");
     let usage = body.usage;
-    Ok(CardCompletion {
+    Ok(ModelCompletion {
         text: output,
         input_tokens: usage.as_ref().map_or(0, |usage| usage.input_tokens),
         cached_input_tokens: usage
@@ -167,19 +167,19 @@ pub fn parse_response(text: &str) -> anyhow::Result<CardCompletion> {
     })
 }
 
-impl CardModel for ResponsesModel {
+impl ShadowModel for ResponsesModel {
     fn name(&self) -> &str {
         &self.model
     }
 
     fn complete<'a>(
         &'a self,
-        prompt: &'a CardPrompt,
-    ) -> BoxFuture<'a, anyhow::Result<CardCompletion>> {
+        prompt: &'a ModelPrompt,
+    ) -> BoxFuture<'a, anyhow::Result<ModelCompletion>> {
         Box::pin(self.structured(
             &prompt.instructions,
             &prompt.input,
-            "index_cards",
+            prompt.schema_name,
             &prompt.schema,
         ))
     }

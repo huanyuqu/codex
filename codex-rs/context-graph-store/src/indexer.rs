@@ -25,40 +25,20 @@ use codex_context_graph::card_prompt::build_card_prompt;
 use codex_context_graph::card_prompt::parse_card_answer;
 use codex_protocol::models::ResponseItem;
 use codex_secrets::redact_secrets;
-use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tracing::warn;
 
 use crate::LocalContextGraphStore;
 use crate::cards::IndexRequest;
+use crate::model::ModelCompletion;
+use crate::model::ShadowModel;
 
 /// Cards kept in memory for the catalog of later prompts.
 const MAX_RECENT_CARDS: usize = 200;
 
 /// Requests that may carry one block: its first batch and one retry.
 const MAX_ATTEMPTS: u32 = 2;
-
-/// The answer of an indexing model, with its token usage.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CardCompletion {
-    pub text: String,
-    pub input_tokens: u64,
-    pub cached_input_tokens: u64,
-    pub output_tokens: u64,
-}
-
-/// A model that writes index cards for a [`CardPrompt`].
-pub trait CardModel: Send + Sync {
-    /// The name recorded as the indexer of the cards it writes, such as its model slug.
-    fn name(&self) -> &str;
-
-    /// Answers `prompt` with JSON that follows `prompt.schema`.
-    fn complete<'a>(
-        &'a self,
-        prompt: &'a CardPrompt,
-    ) -> BoxFuture<'a, anyhow::Result<CardCompletion>>;
-}
 
 /// How the indexer batches and limits model requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,7 +73,7 @@ struct Batch {
 
 struct BatchResult {
     batch: Batch,
-    completion: anyhow::Result<CardCompletion>,
+    completion: anyhow::Result<ModelCompletion>,
     latency: Duration,
 }
 
@@ -102,7 +82,7 @@ pub struct ShadowIndexer {
     store: LocalContextGraphStore,
     graph_id: String,
     branch: BranchId,
-    model: Option<Arc<dyn CardModel>>,
+    model: Option<Arc<dyn ShadowModel>>,
     config: IndexerConfig,
     indexer: BlockIndexer,
     recent: VecDeque<BlockCard>,
@@ -117,7 +97,7 @@ impl ShadowIndexer {
         store: LocalContextGraphStore,
         graph_id: impl Into<String>,
         branch: BranchId,
-        model: Option<Arc<dyn CardModel>>,
+        model: Option<Arc<dyn ShadowModel>>,
         config: IndexerConfig,
     ) -> Self {
         Self {
@@ -215,7 +195,7 @@ impl ShadowIndexer {
         self.requests_started += 1;
         self.in_flight.spawn(async move {
             let started = Instant::now();
-            let completion = model.complete(&batch.prompt).await;
+            let completion = model.complete(&batch.prompt.prompt).await;
             BatchResult {
                 batch,
                 completion,

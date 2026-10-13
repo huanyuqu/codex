@@ -31,7 +31,7 @@ fn responses_yield_their_text_and_usage() {
         .unwrap_or_else(|err| panic!("parse: {err}"));
     assert_eq!(
         completion,
-        CardCompletion {
+        ModelCompletion {
             text: "{\"cards\": []}".to_string(),
             input_tokens: 1200,
             cached_input_tokens: 1024,

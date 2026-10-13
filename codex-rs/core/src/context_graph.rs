@@ -5,9 +5,9 @@ use std::sync::Weak;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use codex_context_graph::card_prompt::CardPrompt;
-use codex_context_graph_store::CardCompletion;
-use codex_context_graph_store::CardModel;
+use codex_context_graph::prompt::ModelPrompt;
+use codex_context_graph_store::ModelCompletion;
+use codex_context_graph_store::ShadowModel;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -29,14 +29,14 @@ use crate::session::session::Session;
 /// its history before it starts.
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Writes index cards with a small model through the session's model client, so indexing goes
-/// to the same provider, with the same authentication and data controls, as the session.
-pub(crate) struct SessionCardModel {
+/// Calls a shadow agent model through the session's model client, so indexing and recall go to
+/// the same provider, with the same authentication and data controls, as the session.
+pub(crate) struct SessionShadowModel {
     session: watch::Sender<Option<Weak<Session>>>,
     model: String,
 }
 
-impl SessionCardModel {
+impl SessionShadowModel {
     pub(crate) fn new(model: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
             session: watch::Sender::new(None),
@@ -64,28 +64,28 @@ impl SessionCardModel {
     }
 }
 
-impl CardModel for SessionCardModel {
+impl ShadowModel for SessionShadowModel {
     fn name(&self) -> &str {
         &self.model
     }
 
     fn complete<'a>(
         &'a self,
-        prompt: &'a CardPrompt,
-    ) -> BoxFuture<'a, anyhow::Result<CardCompletion>> {
+        prompt: &'a ModelPrompt,
+    ) -> BoxFuture<'a, anyhow::Result<ModelCompletion>> {
         Box::pin(async move {
             let session = self.session().await?;
-            session.complete_card_prompt(&self.model, prompt).await
+            session.complete_shadow_prompt(&self.model, prompt).await
         })
     }
 }
 
 impl Session {
-    async fn complete_card_prompt(
+    async fn complete_shadow_prompt(
         &self,
         model: &str,
-        card_prompt: &CardPrompt,
-    ) -> anyhow::Result<CardCompletion> {
+        shadow_prompt: &ModelPrompt,
+    ) -> anyhow::Result<ModelCompletion> {
         let config = self.get_config().await;
         let model_info = self
             .services
@@ -99,16 +99,16 @@ impl Session {
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
-                    text: card_prompt.input.clone(),
+                    text: shadow_prompt.input.clone(),
                 }],
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,
             }],
             base_instructions: BaseInstructions {
-                text: card_prompt.instructions.clone(),
+                text: shadow_prompt.instructions.clone(),
                 provenance: None,
             },
-            output_schema: Some(card_prompt.schema.clone()),
+            output_schema: Some(shadow_prompt.schema.clone()),
             output_schema_strict: true,
             ..Prompt::default()
         };
@@ -138,7 +138,7 @@ impl Session {
             .await?;
 
         // The answer is the last message; a model may comment in messages before it.
-        let mut completion = CardCompletion::default();
+        let mut completion = ModelCompletion::default();
         while let Some(event) = stream.next().await.transpose()? {
             match event {
                 ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. }) => {

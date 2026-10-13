@@ -6,6 +6,7 @@ use codex_context_graph::DefaultClassifier;
 use codex_context_graph::GraphRecorder;
 use codex_context_graph::card::ClaimKind;
 use codex_context_graph::card::EXTRACTED_INDEXER;
+use codex_context_graph::prompt::ModelPrompt;
 use codex_history::ResponseItemEnvelope;
 use codex_history::RolloutItem;
 use codex_protocol::ResponseItemId;
@@ -15,6 +16,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_state::SqliteConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use futures::future::BoxFuture;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
@@ -108,10 +110,11 @@ fn events(items: &[RolloutItem]) -> Vec<RecorderEvent> {
     recorder.take_events()
 }
 
-/// Answers every batch with titles derived from the block IDs, or fails.
+/// Answers every batch with titles derived from the block kinds, or fails. The blocks of
+/// [`turn`] have distinct kinds, so batches are recorded as kind names.
 struct FakeModel {
     fail: bool,
-    /// A block the first answer leaves out.
+    /// The kind of a block the first answer leaves out.
     skip_once: Mutex<Option<String>>,
     batches: Mutex<Vec<Vec<String>>>,
 }
@@ -125,10 +128,10 @@ impl FakeModel {
         })
     }
 
-    fn skipping_once(block_id: &str) -> Arc<Self> {
+    fn skipping_once(kind: &str) -> Arc<Self> {
         Arc::new(Self {
             fail: false,
-            skip_once: Mutex::new(Some(block_id.to_string())),
+            skip_once: Mutex::new(Some(kind.to_string())),
             batches: Mutex::new(Vec::new()),
         })
     }
@@ -141,36 +144,47 @@ impl FakeModel {
     }
 }
 
-impl CardModel for FakeModel {
+/// The `(label, kind)` of every block in the batch, from headers like `### B1 [user_message]`.
+fn batch_blocks(input: &str) -> Vec<(String, String)> {
+    input
+        .lines()
+        .filter_map(|line| {
+            let (label, kind) = line.strip_prefix("### ")?.split_once(' ')?;
+            Some((label.to_string(), kind.trim_matches(['[', ']']).to_string()))
+        })
+        .collect()
+}
+
+impl ShadowModel for FakeModel {
     fn name(&self) -> &str {
         "fake-model"
     }
 
     fn complete<'a>(
         &'a self,
-        prompt: &'a CardPrompt,
-    ) -> BoxFuture<'a, anyhow::Result<CardCompletion>> {
+        prompt: &'a ModelPrompt,
+    ) -> BoxFuture<'a, anyhow::Result<ModelCompletion>> {
         Box::pin(async move {
-            let ids: Vec<String> = prompt.batch.iter().map(ToString::to_string).collect();
+            let blocks = batch_blocks(&prompt.input);
             if let Ok(mut batches) = self.batches.lock() {
-                batches.push(ids.clone());
+                batches.push(blocks.iter().map(|(_, kind)| kind.clone()).collect());
             }
             if self.fail {
                 anyhow::bail!("model unavailable");
             }
             let skip = self.skip_once.lock().ok().and_then(|mut skip| skip.take());
-            let cards: Vec<_> = ids
+            let cards: Vec<_> = blocks
                 .iter()
-                .filter(|id| skip.as_ref() != Some(*id))
-                .map(|id| {
-                    let claims = if id == "blk_msg_u1" {
+                .filter(|(_, kind)| skip.as_ref() != Some(kind))
+                .map(|(label, kind)| {
+                    let claims = if kind == "user_message" {
                         json!([{ "kind": "user_constraint", "text": "do not touch the public API" }])
                     } else {
                         json!([])
                     };
                     json!({
-                        "block_id": id,
-                        "title": format!("model title for {id}"),
+                        "block_id": label,
+                        "title": format!("model title for {kind}"),
                         "summary": "model summary",
                         "claims": claims,
                         "depends_on": [],
@@ -178,7 +192,7 @@ impl CardModel for FakeModel {
                     })
                 })
                 .collect();
-            Ok(CardCompletion {
+            Ok(ModelCompletion {
                 text: json!({ "cards": cards }).to_string(),
                 input_tokens: 100,
                 cached_input_tokens: 40,
@@ -198,7 +212,7 @@ async fn open_store(dir: &TempDir) -> LocalContextGraphStore {
 
 async fn index(
     store: &LocalContextGraphStore,
-    model: Option<Arc<dyn CardModel>>,
+    model: Option<Arc<dyn ShadowModel>>,
     config: IndexerConfig,
     events: Vec<RecorderEvent>,
 ) {
@@ -278,13 +292,13 @@ async fn model_cards_replace_extracted_text_in_batches() {
     assert_eq!(
         model.batches(),
         vec![
-            vec!["blk_msg_u1".to_string(), "blk_fc_1".to_string()],
-            vec!["blk_msg_a1".to_string()],
+            vec!["user_message".to_string(), "tool_exchange".to_string()],
+            vec!["assistant_message".to_string()],
         ]
     );
     let cards = cards(&store).await;
     assert!(cards.iter().all(|card| card.indexer == "fake-model"));
-    assert_eq!(cards[0].title, "model title for blk_msg_u1");
+    assert_eq!(cards[0].title, "model title for user_message");
     assert_eq!(cards[0].claims[0].kind, ClaimKind::UserConstraint);
     // Extracted facts survive the model's rewrite.
     assert_eq!(cards[1].exit_code, Some(0));
@@ -362,7 +376,7 @@ async fn failed_requests_keep_extracted_cards_and_are_counted() {
 async fn blocks_an_answer_misses_are_retried_once() {
     let dir = TempDir::new().unwrap_or_else(|err| panic!("temp dir: {err}"));
     let store = open_store(&dir).await;
-    let model = FakeModel::skipping_once("blk_msg_u1");
+    let model = FakeModel::skipping_once("user_message");
     index(
         &store,
         Some(model.clone()),
@@ -376,9 +390,9 @@ async fn blocks_an_answer_misses_are_retried_once() {
     assert_eq!(
         batches,
         vec![
-            vec!["blk_msg_a1".to_string()],
-            vec!["blk_msg_u1".to_string()],
-            vec!["blk_msg_u1".to_string(), "blk_fc_1".to_string()],
+            vec!["assistant_message".to_string()],
+            vec!["user_message".to_string()],
+            vec!["user_message".to_string(), "tool_exchange".to_string()],
         ]
     );
     assert!(
@@ -436,7 +450,7 @@ async fn running_closes_batches_after_the_wait() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(model.batches(), vec![vec!["blk_msg_u1".to_string()]]);
+    assert_eq!(model.batches(), vec![vec!["user_message".to_string()]]);
     drop(sender);
     task.await
         .unwrap_or_else(|err| panic!("indexer task: {err}"));

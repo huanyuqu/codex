@@ -33,15 +33,24 @@ use tokio::sync::OnceCell;
 mod cards;
 mod indexer;
 mod live;
+mod model;
+mod recall;
+mod views;
 
 pub use cards::IndexRequest;
 pub use cards::IndexUsage;
-pub use indexer::CardCompletion;
-pub use indexer::CardModel;
 pub use indexer::IndexerConfig;
 pub use indexer::ShadowIndexer;
 pub use live::LiveIndexing;
 pub use live::install_live_recorder;
+pub use model::ModelCompletion;
+pub use model::ShadowModel;
+pub use recall::ModelCall;
+pub use recall::Recall;
+pub use recall::RecallConfig;
+pub use recall::RecallStats;
+pub use recall::Recaller;
+pub use views::ViewRecord;
 
 pub const CONTEXT_GRAPH_DB_FILENAME: &str = "context_graph_1.sqlite";
 

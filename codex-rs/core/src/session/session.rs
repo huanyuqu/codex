@@ -1240,7 +1240,7 @@ impl Session {
             let card_model = (config.features.enabled(Feature::ContextGraph)
                 && config.features.enabled(Feature::ContextGraphIndexing))
             .then(|| {
-                crate::context_graph::SessionCardModel::new(
+                crate::context_graph::SessionShadowModel::new(
                     session_configuration
                         .provider
                         .memory_extraction_preferred_model(),
@@ -1251,7 +1251,7 @@ impl Session {
             {
                 let model = card_model
                     .clone()
-                    .map(|model| -> Arc<dyn codex_context_graph_store::CardModel> { model });
+                    .map(|model| -> Arc<dyn codex_context_graph_store::ShadowModel> { model });
                 codex_context_graph_store::install_live_recorder(
                     live_thread,
                     &thread_id.to_string(),

@@ -24,15 +24,15 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::LocalContextGraphStore;
-use crate::indexer::CardModel;
 use crate::indexer::IndexerConfig;
 use crate::indexer::ShadowIndexer;
+use crate::model::ShadowModel;
 
 /// How a live recorder indexes the blocks it records.
 #[derive(Clone, Default)]
 pub struct LiveIndexing {
     /// Model that describes blocks; without one, blocks only get extracted cards.
-    pub model: Option<Arc<dyn CardModel>>,
+    pub model: Option<Arc<dyn ShadowModel>>,
     pub config: IndexerConfig,
 }
 
