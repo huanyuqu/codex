@@ -457,11 +457,16 @@ pub fn excerpt(items: &[ResponseItem], ranges: &[LineRange]) -> String {
     parts.join("\n[...]\n")
 }
 
+const TOOLS_HINT: &str = "To read omitted history, find blocks with `context_search` and read \
+a block or a whole turn with `context_expand`.";
+
 /// Options for rendering a view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RenderOptions {
     /// Keep reasoning items in the recent turns, for a model that can read its own reasoning.
     pub keep_recent_reasoning: bool,
+    /// Tell the model it has tools to read omitted history.
+    pub tools_hint: bool,
 }
 
 /// The items a model sees for `view`: a developer message with the notice, the turn map and the
@@ -471,7 +476,12 @@ pub fn render_view(
     view: &ContextView,
     options: RenderOptions,
 ) -> Vec<ResponseItem> {
-    let mut items = vec![developer_message(&preamble(view))];
+    let mut preamble = preamble(view);
+    if options.tools_hint {
+        preamble.push_str("\n\n");
+        preamble.push_str(TOOLS_HINT);
+    }
+    let mut items = vec![developer_message(&preamble)];
 
     let mut notes = String::new();
     for entry in &view.entries {

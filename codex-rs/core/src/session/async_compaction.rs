@@ -63,7 +63,9 @@ pub(super) async fn maybe_start(
     if matches!(phase, CompactionPhase::PreTurn) && turn_state.is_none() {
         return;
     }
+    // A session that recalls rebuilds its history by recall instead of adopting a summary.
     if !enabled(turn_context)
+        || crate::context_graph::recalls(sess)
         || token_status.token_limit_reached
         || (matches!(phase, CompactionPhase::PostTurn)
             && token_status.turn_end_compaction_threshold_reached)

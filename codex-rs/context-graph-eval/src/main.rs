@@ -30,8 +30,9 @@ use codex_context_graph_eval::probe::read_jsonl;
 use codex_context_graph_eval::provider::Endpoint;
 use codex_context_graph_eval::provider::resolve_endpoint;
 use codex_context_graph_eval::responses::ResponsesModel;
-use codex_context_graph_eval::session::Session;
+use codex_context_graph_eval::session::load_session;
 use codex_context_graph_eval::session::replay;
+use codex_context_graph_store::BranchSnapshot;
 use codex_context_graph_store::IndexRequest;
 use codex_context_graph_store::IndexerConfig;
 use codex_context_graph_store::LocalContextGraphStore;
@@ -358,7 +359,7 @@ async fn index(store: &LocalContextGraphStore, args: IndexArgs) -> anyhow::Resul
 }
 
 async fn recall(store: &LocalContextGraphStore, args: RecallArgs) -> anyhow::Result<()> {
-    let session = Session::load(store, &args.rollout).await?;
+    let session = load_session(store, &args.rollout).await?;
     let history = session.history(args.turn);
     println!(
         "{}: {} of {} blocks up to turn {} ({} without a stored card)",
@@ -466,7 +467,7 @@ async fn probe_gen(store: &LocalContextGraphStore, args: ProbeGenArgs) -> anyhow
     let model = args.models.model(&endpoint, &args.model)?;
     let existing: Vec<Probe> = read_jsonl(&args.out)?;
     for path in &args.rollouts {
-        let session = Session::load(store, path).await?;
+        let session = load_session(store, path).await?;
         let history = session.history(args.turn);
         let turn = history.last_turn();
         let prompt = build_generation_prompt(&history, args.count);
@@ -530,10 +531,10 @@ async fn probe_run(store: &LocalContextGraphStore, args: ProbeRunArgs) -> anyhow
         .map(|name| name.parse::<Condition>())
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let mut sessions: HashMap<PathBuf, Session> = HashMap::new();
+    let mut sessions: HashMap<PathBuf, BranchSnapshot> = HashMap::new();
     for probe in &probes {
         if !sessions.contains_key(&probe.rollout) {
-            let session = Session::load(store, &probe.rollout).await?;
+            let session = load_session(store, &probe.rollout).await?;
             sessions.insert(probe.rollout.clone(), session);
         }
     }

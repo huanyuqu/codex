@@ -128,13 +128,16 @@ async fn live_recording_matches_a_replay_of_the_same_items() {
     let sqlite = sqlite_config(&dir);
 
     let initial = vec![message("msg_u1", "user", "add retries")];
-    assert!(install_live_recorder(
-        &live,
-        "graph-1",
-        &initial,
-        sqlite.clone(),
-        None
-    ));
+    assert!(
+        install_live_recorder(
+            &live,
+            GraphMembership::root("graph-1"),
+            &initial,
+            sqlite.clone(),
+            None
+        )
+        .is_some()
+    );
 
     let appended = vec![
         call("fc_1", "call_1"),
@@ -148,7 +151,7 @@ async fn live_recording_matches_a_replay_of_the_same_items() {
 
     let mut expected = ContextGraph::new();
     let branch_id = BranchId::for_thread("graph-1");
-    let mut branch = Branch::new(branch_id.clone(), "graph-1");
+    let mut branch = Branch::new(branch_id.clone(), "main");
     branch.thread_id = Some("graph-1".to_string());
     expected
         .add_branch(branch)
@@ -170,14 +173,19 @@ async fn a_second_recorder_is_not_installed() {
     let live = live_thread(&dir).await;
     let sqlite = sqlite_config(&dir);
 
-    assert!(install_live_recorder(
-        &live,
-        "graph-1",
-        &[],
-        sqlite.clone(),
-        None
-    ));
-    assert!(!install_live_recorder(&live, "graph-2", &[], sqlite, None));
+    assert!(
+        install_live_recorder(
+            &live,
+            GraphMembership::root("graph-1"),
+            &[],
+            sqlite.clone(),
+            None
+        )
+        .is_some()
+    );
+    assert!(
+        install_live_recorder(&live, GraphMembership::root("graph-2"), &[], sqlite, None).is_none()
+    );
 }
 
 #[tokio::test]
@@ -187,13 +195,16 @@ async fn live_indexing_writes_extracted_cards() {
     let sqlite = sqlite_config(&dir);
 
     let initial = vec![message("msg_u1", "user", "add retries")];
-    assert!(install_live_recorder(
-        &live,
-        "graph-1",
-        &initial,
-        sqlite.clone(),
-        Some(LiveIndexing::default()),
-    ));
+    assert!(
+        install_live_recorder(
+            &live,
+            GraphMembership::root("graph-1"),
+            &initial,
+            sqlite.clone(),
+            Some(LiveIndexing::default()),
+        )
+        .is_some()
+    );
     live.append_items(&[
         call("fc_1", "call_1"),
         output("fco_1", "call_1"),
@@ -226,4 +237,172 @@ async fn live_indexing_writes_extracted_cards() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert_eq!(titles, expected);
+}
+
+#[tokio::test]
+async fn the_live_graph_holds_the_branch_history_with_items() {
+    let dir = TempDir::new().unwrap_or_else(|err| panic!("temp dir: {err}"));
+    let live = live_thread(&dir).await;
+    let graph = install_live_recorder(
+        &live,
+        GraphMembership::root("graph-1"),
+        &[message("msg_u1", "user", "add retries")],
+        sqlite_config(&dir),
+        None,
+    )
+    .unwrap_or_else(|| panic!("recorder not installed"));
+    live.append_items(&[
+        call("fc_1", "call_1"),
+        output("fco_1", "call_1"),
+        message("msg_u2", "user", "now add jitter"),
+    ])
+    .await
+    .unwrap_or_else(|err| panic!("append: {err}"));
+
+    // Appended items are visible as soon as the append returns.
+    let history: Vec<(String, usize)> = graph
+        .observed_history()
+        .into_iter()
+        .map(|block| (block.block.id.to_string(), block.items.len()))
+        .collect();
+    assert_eq!(
+        history,
+        vec![
+            ("blk_msg_u1".to_string(), 1),
+            ("blk_fc_1".to_string(), 2),
+            ("blk_msg_u2".to_string(), 1),
+        ]
+    );
+    let snapshot = graph
+        .snapshot()
+        .await
+        .unwrap_or_else(|err| panic!("snapshot: {err}"));
+    assert_eq!(snapshot.cards[1].title, "exec_command");
+    assert_eq!(snapshot.history(None).last_turn(), 2);
+}
+
+#[tokio::test]
+async fn a_fork_joins_the_graph_of_its_parent() {
+    let dir = TempDir::new().unwrap_or_else(|err| panic!("temp dir: {err}"));
+    let sqlite = sqlite_config(&dir);
+    let shared = vec![
+        message("msg_u1", "user", "add retries"),
+        message("msg_a1", "assistant", "retries added"),
+    ];
+
+    let parent = live_thread(&dir).await;
+    install_live_recorder(
+        &parent,
+        GraphMembership::root("parent"),
+        &shared,
+        sqlite.clone(),
+        None,
+    )
+    .unwrap_or_else(|| panic!("parent recorder not installed"));
+    let store = LocalContextGraphStore::open(&sqlite)
+        .await
+        .unwrap_or_else(|err| panic!("open store: {err}"));
+    stored_graph(&store, "parent", 2).await;
+
+    let child = live_thread(&dir).await;
+    let fork = GraphMembership::fork(
+        "child",
+        "parent",
+        BranchId::for_thread("parent"),
+        "try-jitter",
+    );
+    install_live_recorder(&child, fork, &shared, sqlite.clone(), None)
+        .unwrap_or_else(|| panic!("child recorder not installed"));
+    child
+        .append_items(&[message("msg_u2", "user", "add jitter instead")])
+        .await
+        .unwrap_or_else(|err| panic!("append: {err}"));
+    parent
+        .append_items(&[message("msg_u3", "user", "add a timeout")])
+        .await
+        .unwrap_or_else(|err| panic!("append: {err}"));
+
+    let graph = stored_graph(&store, "parent", 4).await;
+    let branch = graph
+        .branch(&BranchId::for_thread("child"))
+        .unwrap_or_else(|| panic!("child branch missing"));
+    assert_eq!(branch.name, "try-jitter");
+    assert_eq!(branch.parent, Some(BranchId::for_thread("parent")));
+    assert_eq!(
+        branch.fork_point.as_ref().map(BlockId::as_str),
+        Some("blk_msg_a1")
+    );
+    assert_eq!(
+        graph
+            .primary_path(branch.head.as_ref().unwrap_or_else(|| panic!("no head")))
+            .unwrap_or_default()
+            .iter()
+            .map(BlockId::as_str)
+            .collect::<Vec<_>>(),
+        vec!["blk_msg_u1", "blk_msg_a1", "blk_msg_u2"]
+    );
+    assert_eq!(
+        store
+            .branch_of_thread("child")
+            .await
+            .ok()
+            .flatten()
+            .map(|(graph_id, branch)| (graph_id, branch.name)),
+        Some(("parent".to_string(), "try-jitter".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn threads_find_their_graph_membership() {
+    let dir = TempDir::new().unwrap_or_else(|err| panic!("temp dir: {err}"));
+    let sqlite = sqlite_config(&dir);
+    let store = LocalContextGraphStore::open(&sqlite)
+        .await
+        .unwrap_or_else(|err| panic!("open store: {err}"));
+    let membership = |thread: &'static str, parent: Option<&'static str>| {
+        let store = store.clone();
+        async move {
+            store
+                .membership_for_thread(thread, parent)
+                .await
+                .unwrap_or_else(|err| panic!("membership: {err}"))
+        }
+    };
+
+    assert_eq!(
+        membership("root-1", None).await,
+        GraphMembership::root("root-1")
+    );
+    // A fork of an unrecorded thread starts its own graph.
+    assert_eq!(
+        membership("fork-a", Some("root-1")).await,
+        GraphMembership::root("fork-a")
+    );
+
+    let root = live_thread(&dir).await;
+    install_live_recorder(
+        &root,
+        GraphMembership::root("root-1"),
+        &[message("msg_u1", "user", "add retries")],
+        sqlite.clone(),
+        None,
+    )
+    .unwrap_or_else(|| panic!("recorder not installed"));
+    stored_graph(&store, "root-1", 1).await;
+
+    let fork = membership("thread-0123456789", Some("root-1")).await;
+    assert_eq!(
+        fork,
+        GraphMembership::fork(
+            "thread-0123456789",
+            "root-1",
+            BranchId::for_thread("root-1"),
+            "fork-23456789"
+        )
+    );
+    // A recorded thread keeps its branch.
+    assert_eq!(
+        membership("root-1", None).await,
+        GraphMembership::root("root-1")
+    );
 }

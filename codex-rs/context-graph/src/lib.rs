@@ -9,6 +9,7 @@
 //! are shared with its source. This crate is pure logic and performs no IO.
 
 mod block;
+pub mod branches;
 pub mod card;
 pub mod card_prompt;
 pub mod extract;
@@ -17,6 +18,7 @@ pub mod history;
 mod ids;
 mod index;
 pub mod links;
+pub mod lookup;
 pub mod prompt;
 pub mod read;
 pub mod render;

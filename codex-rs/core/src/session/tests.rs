@@ -6983,6 +6983,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         ),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
+        context_graph: None,
     };
 
     let session = Session {
@@ -9250,6 +9251,7 @@ where
         ),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
+        context_graph: None,
     };
 
     let session = Arc::new(Session {

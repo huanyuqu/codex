@@ -1237,32 +1237,17 @@ impl Session {
                 resumed.history = history;
                 resumed.history_revision = None;
             }
-            let card_model = (config.features.enabled(Feature::ContextGraph)
-                && config.features.enabled(Feature::ContextGraphIndexing))
-            .then(|| {
-                crate::context_graph::SessionShadowModel::new(
-                    session_configuration
-                        .provider
-                        .memory_extraction_preferred_model(),
-                )
-            });
-            if config.features.enabled(Feature::ContextGraph)
-                && let Some(live_thread) = live_thread.as_ref()
-            {
-                let model = card_model
-                    .clone()
-                    .map(|model| -> Arc<dyn codex_context_graph_store::ShadowModel> { model });
-                codex_context_graph_store::install_live_recorder(
-                    live_thread,
-                    &thread_id.to_string(),
-                    initial_history.get_rollout_items(),
-                    config.sqlite.clone(),
-                    Some(codex_context_graph_store::LiveIndexing {
-                        model,
-                        config: Default::default(),
-                    }),
-                );
-            }
+            let context_graph = crate::context_graph::start(
+                &config,
+                session_configuration
+                    .provider
+                    .memory_extraction_preferred_model(),
+                thread_id,
+                session_configuration.forked_from_thread_id,
+                live_thread.as_ref(),
+                initial_history.get_rollout_items(),
+            )
+            .await;
             let rollout_path = if let Some(live_thread) = live_thread.as_ref() {
                 live_thread.local_rollout_path().await?
             } else {
@@ -1849,6 +1834,7 @@ impl Session {
                 ),
                 tool_search_handler_cache: Default::default(),
                 turn_environments: Arc::clone(&turn_environments),
+                context_graph: context_graph.service.clone(),
             };
             let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);
             let sess = Arc::new(Session {
@@ -1890,9 +1876,7 @@ impl Session {
                 forked_from_ordinal_exclusive,
                 next_internal_sub_id: AtomicU64::new(0),
             });
-            if let Some(card_model) = &card_model {
-                card_model.attach(&sess);
-            }
+            context_graph.attach(&sess);
             if let Some(startup) = &startup {
                 startup.set_session(Arc::clone(&sess));
             }

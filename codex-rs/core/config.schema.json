@@ -1415,6 +1415,53 @@
       },
       "type": "object"
     },
+    "ContextGraphToml": {
+      "additionalProperties": false,
+      "description": "Context graph settings loaded from config.toml.",
+      "properties": {
+        "index_model": {
+          "description": "Model that writes block cards. Defaults to the provider's memory extraction model.",
+          "type": "string"
+        },
+        "mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ContextMode"
+            }
+          ],
+          "description": "How threads manage their history. Recall needs the `context_graph` feature."
+        },
+        "read_model": {
+          "description": "Model that reads blocks whose cards were not enough to decide. Defaults to the screening model; `\"none\"` skips reading.",
+          "type": "string"
+        },
+        "recall_budget_tokens": {
+          "description": "Token budget of a recalled context.",
+          "format": "uint32",
+          "minimum": 1000.0,
+          "type": "integer"
+        },
+        "recent_turns": {
+          "description": "Most recent turns that recall always keeps in full.",
+          "format": "uint",
+          "maximum": 20.0,
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "screen_model": {
+          "description": "Model that screens cards to choose context. Defaults to the indexing model.",
+          "type": "string"
+        },
+        "soft_limit_percent": {
+          "description": "In `auto` mode, the share of the context window, in percent, at which recall rebuilds the history.",
+          "format": "uint8",
+          "maximum": 95.0,
+          "minimum": 10.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "ContextManagementConfigToml": {
       "additionalProperties": false,
       "properties": {
@@ -1424,6 +1471,32 @@
         }
       },
       "type": "object"
+    },
+    "ContextMode": {
+      "description": "How a thread manages the history its model sees.",
+      "oneOf": [
+        {
+          "description": "Keep the whole history and compact it with summaries when the context window fills up.",
+          "enum": [
+            "full"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Keep the whole history until it reaches the soft limit, then rebuild it by recall instead of compacting it.",
+          "enum": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Rebuild the history by recall before every turn.",
+          "enum": [
+            "recall"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "CopyOnSelect": {
       "description": "When mouse selections are copied on release.",
@@ -7011,6 +7084,14 @@
     },
     "computer_use": {
       "$ref": "#/definitions/ComputerUseConfigToml"
+    },
+    "context_graph": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ContextGraphToml"
+        }
+      ],
+      "description": "Context graph settings: indexing models and how recall rebuilds the history."
     },
     "daybreak": {
       "description": "Default Daybreak preference for new threads and non-interactive turns.",

@@ -388,6 +388,33 @@ pub(crate) async fn run_turn(
         return Ok(None);
     }
 
+    // A session that recalls may rebuild its history for this turn's request, falling back to
+    // summary compaction when recall fails and the context window is full.
+    let question = crate::context_graph::question_text(&user_input);
+    if !crate::context_graph::recall_into_history(
+        &sess,
+        &first_step_context,
+        Some(&question),
+        crate::context_graph::RecallTrigger::TurnStart,
+    )
+    .await?
+        && crate::context_graph::recalls(&sess)
+        && super::context_window::context_window_token_status(sess.as_ref(), &turn_context)
+            .await
+            .token_limit_reached
+    {
+        run_summary_compact(
+            &sess,
+            Arc::clone(&first_step_context),
+            Arc::clone(&first_step_context),
+            &mut client_session,
+            CompactionReason::ContextLimit,
+            CompactionPhase::MidTurn,
+            /*candidate*/ None,
+        )
+        .await?;
+    }
+
     // Only speculate after hooks accept the turn, using its finalized tools and permissions.
     {
         let mut state = sess.state.lock().await;
@@ -1382,7 +1409,10 @@ async fn run_pre_sampling_compact(
             .await;
     let candidate = super::async_compaction::take_ready(sess, turn_context).await;
     // Compact if the configured auto-compaction budget or usable context window is exhausted.
-    if token_status.token_limit_reached || candidate.is_some() {
+    // A session that recalls rebuilds its history once the turn's input is recorded instead.
+    if (token_status.token_limit_reached || candidate.is_some())
+        && !crate::context_graph::recalls(sess)
+    {
         // Pre-turn compaction runs before run_turn creates the normal sampling step.
         let step_context = sess
             .capture_step_context(Arc::clone(turn_context), cancellation_token)
@@ -1520,6 +1550,39 @@ async fn run_auto_compact(
     {
         return Ok(false);
     }
+    if crate::context_graph::recall_into_history(
+        sess,
+        &replacement_step_context,
+        /*question*/ None,
+        crate::context_graph::RecallTrigger::ContextLimit,
+    )
+    .await?
+    {
+        return Ok(true);
+    }
+    run_summary_compact(
+        sess,
+        step_context,
+        replacement_step_context,
+        client_session,
+        reason,
+        phase,
+        candidate,
+    )
+    .await
+}
+
+/// Compacts the history into a summary, with the provider's compaction implementation.
+async fn run_summary_compact(
+    sess: &Arc<Session>,
+    step_context: Arc<StepContext>,
+    replacement_step_context: Arc<StepContext>,
+    client_session: &mut ModelClientSession,
+    reason: CompactionReason,
+    phase: CompactionPhase,
+    candidate: Option<Box<BackgroundCompactionCandidate>>,
+) -> CodexResult<bool> {
+    let turn_context = &step_context.turn;
     let world_state = Arc::new(
         sess.build_world_state_for_step(&replacement_step_context, /*new_window*/ true)
             .await?,

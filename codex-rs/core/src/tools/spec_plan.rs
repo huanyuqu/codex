@@ -9,6 +9,8 @@ use crate::tools::effective_tool_mode;
 use crate::tools::handlers::ApplyPatchHandler;
 use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
+use crate::tools::handlers::ContextExpandHandler;
+use crate::tools::handlers::ContextSearchHandler;
 use crate::tools::handlers::CurrentTimeHandler;
 use crate::tools::handlers::DynamicToolHandler;
 use crate::tools::handlers::ExecCommandHandler;
@@ -1359,6 +1361,14 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
     if features.enabled(Feature::TokenBudget) {
         registry.add_with_exposure(NewContextWindowHandler, ToolExposure::DirectModelOnly);
         registry.add(GetContextRemainingHandler);
+    }
+
+    // Recall leaves parts of the history out of the context; these tools read them back.
+    if features.enabled(Feature::ContextGraph)
+        && turn_context.config.context_graph.mode != codex_config::types::ContextMode::Full
+    {
+        registry.add(ContextSearchHandler);
+        registry.add(ContextExpandHandler);
     }
 
     let current_time_reminder_enabled = features.enabled(Feature::CurrentTimeReminder);

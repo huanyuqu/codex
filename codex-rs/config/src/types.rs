@@ -354,6 +354,95 @@ pub struct MemoriesToml {
     pub consolidation_model: Option<String>,
 }
 
+/// How a thread manages the history its model sees.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ContextMode {
+    /// Keep the whole history and compact it with summaries when the context window fills up.
+    #[default]
+    Full,
+    /// Keep the whole history until it reaches the soft limit, then rebuild it by recall
+    /// instead of compacting it.
+    Auto,
+    /// Rebuild the history by recall before every turn.
+    Recall,
+}
+
+/// Context graph settings loaded from config.toml.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ContextGraphToml {
+    /// How threads manage their history. Recall needs the `context_graph` feature.
+    pub mode: Option<ContextMode>,
+    /// Model that writes block cards. Defaults to the provider's memory extraction model.
+    pub index_model: Option<String>,
+    /// Model that screens cards to choose context. Defaults to the indexing model.
+    pub screen_model: Option<String>,
+    /// Model that reads blocks whose cards were not enough to decide. Defaults to the screening
+    /// model; `"none"` skips reading.
+    pub read_model: Option<String>,
+    /// Token budget of a recalled context.
+    #[schemars(range(min = 1000))]
+    pub recall_budget_tokens: Option<u32>,
+    /// Most recent turns that recall always keeps in full.
+    #[schemars(range(min = 1, max = 20))]
+    pub recent_turns: Option<usize>,
+    /// In `auto` mode, the share of the context window, in percent, at which recall rebuilds
+    /// the history.
+    #[schemars(range(min = 10, max = 95))]
+    pub soft_limit_percent: Option<u8>,
+}
+
+/// Effective context graph settings after defaults are applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContextGraphConfig {
+    pub mode: ContextMode,
+    pub index_model: Option<String>,
+    pub screen_model: Option<String>,
+    pub read_model: Option<String>,
+    pub recall_budget_tokens: u32,
+    pub recent_turns: usize,
+    pub soft_limit_percent: u8,
+}
+
+impl Default for ContextGraphConfig {
+    fn default() -> Self {
+        Self {
+            mode: ContextMode::Full,
+            index_model: None,
+            screen_model: None,
+            read_model: None,
+            recall_budget_tokens: 40_000,
+            recent_turns: 2,
+            soft_limit_percent: 50,
+        }
+    }
+}
+
+impl From<ContextGraphToml> for ContextGraphConfig {
+    fn from(toml: ContextGraphToml) -> Self {
+        let defaults = Self::default();
+        Self {
+            mode: toml.mode.unwrap_or(defaults.mode),
+            index_model: toml.index_model,
+            screen_model: toml.screen_model,
+            read_model: toml.read_model,
+            recall_budget_tokens: toml
+                .recall_budget_tokens
+                .unwrap_or(defaults.recall_budget_tokens)
+                .max(1_000),
+            recent_turns: toml
+                .recent_turns
+                .unwrap_or(defaults.recent_turns)
+                .clamp(1, 20),
+            soft_limit_percent: toml
+                .soft_limit_percent
+                .unwrap_or(defaults.soft_limit_percent)
+                .clamp(10, 95),
+        }
+    }
+}
+
 /// Effective memories settings after defaults are applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MemoriesConfig {

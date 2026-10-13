@@ -103,6 +103,8 @@ pub(crate) struct SessionServices {
     pub(crate) code_mode_service: CodeModeService,
     pub(crate) tool_search_handler_cache: ToolSearchHandlerCache,
     pub(crate) turn_environments: Arc<ThreadEnvironments>,
+    /// Recall and context tools, when the thread records a context graph and recalls.
+    pub(crate) context_graph: Option<Arc<crate::context_graph::ContextGraphService>>,
 }
 
 impl SessionServices {

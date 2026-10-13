@@ -1,4 +1,4 @@
-//! Context graph indexing with the session's own model client.
+//! Shadow agent models that call the session's own model client.
 
 use std::sync::Arc;
 use std::sync::Weak;

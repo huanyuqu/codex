@@ -255,6 +255,7 @@ fn reasoning_stays_only_in_recent_turns_and_only_when_asked() {
             &view,
             RenderOptions {
                 keep_recent_reasoning,
+                tools_hint: false,
             },
         )
         .iter()
@@ -263,4 +264,23 @@ fn reasoning_stays_only_in_recent_turns_and_only_when_asked() {
     };
     assert!(!render(false).contains(&"reasoning".to_string()));
     assert!(render(true).contains(&"reasoning".to_string()));
+}
+
+#[test]
+fn the_tools_hint_follows_the_preamble() {
+    let session = retry_session();
+    let history = session.history();
+    let view = plan_view(&history, &[], limits(1));
+    let items = render_view(
+        &history,
+        &view,
+        RenderOptions {
+            keep_recent_reasoning: false,
+            tools_hint: true,
+        },
+    );
+    assert!(text(&items[0]).ends_with(
+        "To read omitted history, find blocks with `context_search` and read a block or a whole \
+         turn with `context_expand`."
+    ));
 }

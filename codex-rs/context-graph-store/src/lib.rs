@@ -33,16 +33,21 @@ use tokio::sync::OnceCell;
 mod cards;
 mod indexer;
 mod live;
+mod merges;
 mod model;
 mod recall;
+mod snapshot;
 mod views;
 
 pub use cards::IndexRequest;
 pub use cards::IndexUsage;
 pub use indexer::IndexerConfig;
 pub use indexer::ShadowIndexer;
+pub use live::GraphMembership;
+pub use live::LiveContextGraph;
 pub use live::LiveIndexing;
 pub use live::install_live_recorder;
+pub use merges::MergeRecord;
 pub use model::ModelCompletion;
 pub use model::ShadowModel;
 pub use recall::ModelCall;
@@ -50,6 +55,7 @@ pub use recall::Recall;
 pub use recall::RecallConfig;
 pub use recall::RecallStats;
 pub use recall::Recaller;
+pub use snapshot::BranchSnapshot;
 pub use views::ViewRecord;
 
 pub const CONTEXT_GRAPH_DB_FILENAME: &str = "context_graph_1.sqlite";
@@ -123,6 +129,54 @@ impl LocalContextGraphStore {
         Ok(())
     }
 
+    /// Adds the blocks and branches of `graph` that are not stored yet and updates its branches,
+    /// keeping everything else stored for `graph_id`, such as the other branches of a shared
+    /// graph.
+    pub async fn merge_graph(&self, graph_id: &str, graph: &ContextGraph) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut next_seq = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(MAX(seq) + 1, 0) FROM cg_blocks WHERE graph_id = ?",
+        )
+        .bind(graph_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        for node in graph.nodes() {
+            if insert_block(&mut tx, graph_id, next_seq, node).await? {
+                next_seq += 1;
+            }
+        }
+        for branch in graph.branches() {
+            upsert_branch(&mut tx, graph_id, branch).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The graph and branch that `thread_id` records into, when it has been recorded.
+    pub async fn branch_of_thread(
+        &self,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<(String, Branch)>> {
+        // A thread's rolled-back history is stored as more branches of the same thread.
+        let Some(row) = sqlx::query(
+            "SELECT graph_id, branch_id FROM cg_branches WHERE thread_id = ? \
+             ORDER BY status = 'active' DESC, branch_id LIMIT 1",
+        )
+        .bind(thread_id)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let graph_id: String = row.try_get("graph_id")?;
+        let branch_id = BranchId::new(row.try_get::<String, _>("branch_id")?);
+        let branch = self
+            .load_graph(&graph_id)
+            .await?
+            .and_then(|graph| graph.branch(&branch_id).cloned());
+        Ok(branch.map(|branch| (graph_id, branch)))
+    }
+
     /// Stores a block that was just recorded, after every block already stored for `graph_id`.
     ///
     /// Blocks that are already stored, such as a prefix shared with another branch, are kept.
@@ -143,6 +197,24 @@ impl LocalContextGraphStore {
     pub async fn upsert_branch(&self, graph_id: &str, branch: &Branch) -> anyhow::Result<()> {
         let mut connection = self.pool.acquire().await?;
         upsert_branch(&mut connection, graph_id, branch).await
+    }
+
+    /// Renames a branch. Recording keeps the stored name, so the new name sticks.
+    pub async fn rename_branch(
+        &self,
+        graph_id: &str,
+        branch: &BranchId,
+        name: &str,
+    ) -> anyhow::Result<bool> {
+        let renamed =
+            sqlx::query("UPDATE cg_branches SET name = ? WHERE graph_id = ? AND branch_id = ?")
+                .bind(name)
+                .bind(graph_id)
+                .bind(branch.as_str())
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        Ok(renamed > 0)
     }
 
     /// Loads and validates a stored graph.
@@ -239,14 +311,15 @@ impl LocalContextGraphStore {
     }
 }
 
+/// Stores `node` unless it is stored already; returns whether it was new.
 async fn insert_block(
     connection: &mut SqliteConnection,
     graph_id: &str,
     seq: i64,
     node: &BlockNode,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let block = &node.block;
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT OR IGNORE INTO cg_blocks (graph_id, block_id, seq, kind, owner_branch_id, turn_id, \
          item_keys, first_ordinal, last_ordinal, approx_bytes, complete) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -263,7 +336,9 @@ async fn insert_block(
     .bind(to_i64(block.approx_bytes))
     .bind(block.complete)
     .execute(&mut *connection)
-    .await?;
+    .await?
+    .rows_affected()
+        > 0;
     for (position, parent) in node.parents.iter().enumerate() {
         sqlx::query(
             "INSERT OR IGNORE INTO cg_edges (graph_id, child_block_id, position, parent_block_id) \
@@ -276,7 +351,7 @@ async fn insert_block(
         .execute(&mut *connection)
         .await?;
     }
-    Ok(())
+    Ok(inserted)
 }
 
 async fn upsert_branch(
@@ -287,8 +362,7 @@ async fn upsert_branch(
     sqlx::query(
         "INSERT INTO cg_branches (graph_id, branch_id, name, thread_id, parent_branch_id, \
          fork_point, head, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(graph_id, branch_id) DO UPDATE SET \
-         name = excluded.name, thread_id = excluded.thread_id, \
+         ON CONFLICT(graph_id, branch_id) DO UPDATE SET thread_id = excluded.thread_id, \
          parent_branch_id = excluded.parent_branch_id, fork_point = excluded.fork_point, \
          head = excluded.head, status = excluded.status",
     )

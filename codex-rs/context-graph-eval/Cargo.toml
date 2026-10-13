@@ -21,7 +21,6 @@ anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 codex-context-graph = { workspace = true }
 codex-context-graph-store = { workspace = true }
-codex-protocol = { workspace = true }
 codex-rollout = { workspace = true }
 codex-state = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
@@ -34,6 +33,7 @@ toml = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+codex-protocol = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 wiremock = { workspace = true }

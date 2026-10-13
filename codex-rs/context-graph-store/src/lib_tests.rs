@@ -164,3 +164,53 @@ async fn reopening_keeps_data_and_missing_graphs_load_as_none() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn renames_stick_and_merges_are_recorded() {
+    let home = TempDir::new().unwrap_or_else(|err| panic!("temp dir: {err}"));
+    let store = open_store(&home).await;
+    let graph = build_graph(None).await;
+    store
+        .replace_graph("graph-1", &graph)
+        .await
+        .unwrap_or_else(|err| panic!("store graph: {err}"));
+    let branch = graph
+        .branches()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| panic!("no branch"));
+
+    assert!(
+        store
+            .rename_branch("graph-1", &branch.id, "retries")
+            .await
+            .unwrap_or_default()
+    );
+    // Recording the branch again keeps the new name.
+    store
+        .upsert_branch("graph-1", &branch)
+        .await
+        .unwrap_or_else(|err| panic!("upsert: {err}"));
+    let stored = store
+        .load_graph("graph-1")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|graph| graph.branch(&branch.id).cloned());
+    assert_eq!(
+        stored.map(|branch| branch.name),
+        Some("retries".to_string())
+    );
+
+    let merge = MergeRecord {
+        target: branch.id.clone(),
+        source: BranchId::new("br_side"),
+        source_head: branch.head.clone(),
+        mode: "fold".to_string(),
+    };
+    store
+        .record_merge("graph-1", &merge)
+        .await
+        .unwrap_or_else(|err| panic!("record merge: {err}"));
+    assert_eq!(store.load_merges("graph-1").await.ok(), Some(vec![merge]));
+}
