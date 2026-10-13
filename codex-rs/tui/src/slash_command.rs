@@ -48,6 +48,8 @@ pub enum SlashCommand {
     Agents,
     Side,
     Btw,
+    Branch,
+    Context,
     Copy,
     Export,
     Raw,
@@ -108,6 +110,8 @@ impl SlashCommand {
             SlashCommand::Fork => "fork the current chat",
             SlashCommand::Merge => "merge saved branches into this chat",
             SlashCommand::Tree => "browse and switch conversation branches",
+            SlashCommand::Branch => "show or rename this chat's branch",
+            SlashCommand::Context => "show how this chat manages its context, or switch the mode",
             SlashCommand::Worktree => "start or continue a conversation in a new worktree",
             SlashCommand::App => "continue this session in the Desktop app",
             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
@@ -181,6 +185,8 @@ impl SlashCommand {
                 | SlashCommand::Fork
                 | SlashCommand::Merge
                 | SlashCommand::Tree
+                | SlashCommand::Branch
+                | SlashCommand::Context
                 | SlashCommand::Plan
                 | SlashCommand::Goal
                 | SlashCommand::Voice
@@ -204,6 +210,7 @@ impl SlashCommand {
         matches!(
             self,
             SlashCommand::Copy
+                | SlashCommand::Merge
                 | SlashCommand::Agents
                 | SlashCommand::Export
                 | SlashCommand::Raw
@@ -307,7 +314,9 @@ impl SlashCommand {
             | SlashCommand::Quit
             | SlashCommand::Exit
             | SlashCommand::Side
-            | SlashCommand::Btw => true,
+            | SlashCommand::Btw
+            | SlashCommand::Branch
+            | SlashCommand::Context => true,
             SlashCommand::Rollout => true,
             SlashCommand::TestApproval => true,
             SlashCommand::Agents | SlashCommand::MultiAgents => true,
@@ -356,7 +365,8 @@ mod tests {
         assert!(SlashCommand::Merge.supports_inline_args());
         assert!(!SlashCommand::Merge.available_during_task());
         assert!(!SlashCommand::Merge.available_when_thread_unavailable());
-        assert!(!SlashCommand::Merge.available_in_side_conversation());
+        // In a side conversation, /merge folds it into its parent.
+        assert!(SlashCommand::Merge.available_in_side_conversation());
     }
 
     #[test]

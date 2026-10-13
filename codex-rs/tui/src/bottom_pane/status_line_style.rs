@@ -42,7 +42,8 @@ impl StatusLineAccent {
             StatusLineItem::CurrentDir | StatusLineItem::ProjectRoot => Self::Path,
             StatusLineItem::GitBranch
             | StatusLineItem::PullRequestNumber
-            | StatusLineItem::BranchChanges => Self::Branch,
+            | StatusLineItem::BranchChanges
+            | StatusLineItem::ContextBranch => Self::Branch,
             StatusLineItem::Status => Self::State,
             StatusLineItem::ContextRemaining
             | StatusLineItem::ContextUsed

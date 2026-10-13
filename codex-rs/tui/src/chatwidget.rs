@@ -747,6 +747,10 @@ pub(crate) struct ChatWidget {
     pub(crate) terminal_title_next_refresh: Option<Instant>,
     // Cached project-root display name keyed by cwd for status/title rendering.
     status_line_project_root_name_cache: Option<CachedProjectRootName>,
+    // The conversation branch shown in the status line, with the thread it was read for.
+    context_branch: Option<(ThreadId, Option<String>)>,
+    // The thread whose branch name is being read.
+    context_branch_pending: Option<ThreadId>,
     // Cached git branch name for the status line (None if unknown).
     status_line_branch: Option<String>,
     // CWD used to resolve the cached branch; change resets branch state.

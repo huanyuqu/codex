@@ -5,6 +5,26 @@ use codex_app_server_protocol::ImageReference;
 use codex_utils_path_uri::LegacyAppPathString;
 
 impl ChatWidget {
+    /// A turn with `text` and this chat's current settings, for a branch that works in `cwd`.
+    pub(crate) fn branch_user_turn(&self, text: String, cwd: PathBuf) -> AppCommand {
+        AppCommand::user_turn(
+            uuid::Uuid::new_v4().to_string(),
+            vec![UserInput::Text {
+                text,
+                text_elements: Vec::new(),
+            }],
+            cwd,
+            AskForApproval::from(self.config.permissions.approval_policy.value()),
+            self.config.permissions.active_permission_profile(),
+            self.current_model().to_string(),
+            self.current_reasoning_effort(),
+            /*summary*/ None,
+            self.service_tier_update_for_core(),
+            /*final_output_json_schema*/ None,
+            /*collaboration_mode*/ None,
+        )
+    }
+
     pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {
         self.bottom_pane.set_task_mentions_enabled(enabled);
     }

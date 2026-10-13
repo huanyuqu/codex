@@ -198,6 +198,37 @@ impl ChatWidget {
         } else {
             self.cancel_thread_usage_polling();
         }
+
+        if selections
+            .status_line_items
+            .contains(&StatusLineItem::ContextBranch)
+            && let Some(thread_id) = self.thread_id
+            && self.context_branch.as_ref().map(|(id, _)| *id) != Some(thread_id)
+            && self.context_branch_pending != Some(thread_id)
+        {
+            self.context_branch_pending = Some(thread_id);
+            self.app_event_tx
+                .send(AppEvent::RefreshContextBranchName { thread_id });
+        }
+    }
+
+    /// Stores the name of `thread_id`'s branch for the status line.
+    pub(crate) fn set_context_branch_name(&mut self, thread_id: ThreadId, name: Option<String>) {
+        if self.context_branch_pending == Some(thread_id) {
+            self.context_branch_pending = None;
+        }
+        if self.thread_id != Some(thread_id) {
+            return;
+        }
+        self.context_branch = Some((thread_id, name));
+        self.refresh_status_surfaces();
+    }
+
+    /// Looks the branch name up again, after the graph changed.
+    pub(crate) fn invalidate_context_branch_name(&mut self) {
+        if self.context_branch.take().is_some() {
+            self.refresh_status_surfaces();
+        }
     }
 
     fn refresh_status_line_from_selections(&mut self, selections: &StatusSurfaceSelections) {
@@ -868,6 +899,12 @@ impl ChatWidget {
                 .as_deref()
                 .and_then(normalize_thread_name)
                 .or_else(|| self.thread_id.map(|id| id.to_string())),
+            StatusLineItem::ContextBranch => self
+                .context_branch
+                .as_ref()
+                .filter(|(thread_id, _)| Some(*thread_id) == self.thread_id)
+                .and_then(|(_, name)| name.as_ref())
+                .map(|name| format!("branch {name}")),
             StatusLineItem::WorkspaceHeadline => self.status_line_workspace_headline.clone(),
             StatusLineItem::TaskProgress => self.terminal_title_task_progress(),
         }
@@ -894,6 +931,7 @@ impl ChatWidget {
             StatusSurfacePreviewItem::Hostname => StatusLineItem::Hostname,
             StatusSurfacePreviewItem::ThreadName => StatusLineItem::ThreadName,
             StatusSurfacePreviewItem::ThreadTitle => StatusLineItem::ThreadTitle,
+            StatusSurfacePreviewItem::ContextBranch => StatusLineItem::ContextBranch,
             StatusSurfacePreviewItem::GitBranch => StatusLineItem::GitBranch,
             StatusSurfacePreviewItem::PullRequestNumber => StatusLineItem::PullRequestNumber,
             StatusSurfacePreviewItem::BranchChanges => StatusLineItem::BranchChanges,

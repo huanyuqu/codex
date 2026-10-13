@@ -54,6 +54,11 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigRequirementsReadResponse;
 use codex_app_server_protocol::ConfigWriteResponse;
+use codex_app_server_protocol::ContextGraphMergeMode;
+use codex_app_server_protocol::ContextGraphMergeParams;
+use codex_app_server_protocol::ContextGraphMergeResponse;
+use codex_app_server_protocol::ContextGraphReadParams;
+use codex_app_server_protocol::ContextGraphReadResponse;
 use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountResponse;
@@ -1548,6 +1553,118 @@ impl AppServerSession {
             .await
             .wrap_err("thread/name/set failed in TUI")?;
         Ok(())
+    }
+
+    pub(crate) async fn context_graph_read(
+        &mut self,
+        thread_id: ThreadId,
+    ) -> Result<ContextGraphReadResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ContextGraphRead {
+                request_id,
+                params: ContextGraphReadParams {
+                    thread_id: thread_id.to_string(),
+                },
+            })
+            .await
+            .wrap_err("contextGraph/read failed in TUI")
+    }
+
+    pub(crate) async fn context_graph_merge(
+        &mut self,
+        thread_id: ThreadId,
+        branch: String,
+        mode: ContextGraphMergeMode,
+    ) -> Result<ContextGraphMergeResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ContextGraphMerge {
+                request_id,
+                params: ContextGraphMergeParams {
+                    thread_id: thread_id.to_string(),
+                    branch,
+                    mode,
+                },
+            })
+            .await
+            .wrap_err("contextGraph/merge failed in TUI")
+    }
+
+    pub(crate) async fn context_graph_branch_rename(
+        &mut self,
+        thread_id: ThreadId,
+        name: String,
+    ) -> Result<()> {
+        let request_id = self.next_request_id();
+        let _: codex_app_server_protocol::ContextGraphBranchRenameResponse = self
+            .client
+            .request_typed(ClientRequest::ContextGraphBranchRename {
+                request_id,
+                params: codex_app_server_protocol::ContextGraphBranchRenameParams {
+                    thread_id: thread_id.to_string(),
+                    name,
+                },
+            })
+            .await
+            .wrap_err("contextGraph/branch/rename failed in TUI")?;
+        Ok(())
+    }
+
+    pub(crate) async fn context_graph_branch_preview(
+        &mut self,
+        thread_id: ThreadId,
+        branch: String,
+    ) -> Result<codex_app_server_protocol::ContextGraphBranchPreviewResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ContextGraphBranchPreview {
+                request_id,
+                params: codex_app_server_protocol::ContextGraphBranchPreviewParams {
+                    thread_id: thread_id.to_string(),
+                    branch,
+                },
+            })
+            .await
+            .wrap_err("contextGraph/branch/preview failed in TUI")
+    }
+
+    pub(crate) async fn context_graph_mode_set(
+        &mut self,
+        thread_id: ThreadId,
+        mode: codex_app_server_protocol::ContextGraphMode,
+    ) -> Result<()> {
+        let request_id = self.next_request_id();
+        let _: codex_app_server_protocol::ContextGraphModeSetResponse = self
+            .client
+            .request_typed(ClientRequest::ContextGraphModeSet {
+                request_id,
+                params: codex_app_server_protocol::ContextGraphModeSetParams {
+                    thread_id: thread_id.to_string(),
+                    mode,
+                },
+            })
+            .await
+            .wrap_err("contextGraph/mode/set failed in TUI")?;
+        Ok(())
+    }
+
+    pub(crate) async fn context_graph_views_read(
+        &mut self,
+        thread_id: ThreadId,
+        limit: u32,
+    ) -> Result<codex_app_server_protocol::ContextGraphViewsReadResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ContextGraphViewsRead {
+                request_id,
+                params: codex_app_server_protocol::ContextGraphViewsReadParams {
+                    thread_id: thread_id.to_string(),
+                    limit: Some(limit),
+                },
+            })
+            .await
+            .wrap_err("contextGraph/views/read failed in TUI")
     }
 
     pub(crate) async fn thread_memory_mode_set(

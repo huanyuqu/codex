@@ -316,8 +316,13 @@ impl ChatWidget {
             SlashCommand::Fork => {
                 self.show_session_checkout_picker(ManagedWorktreeMode::Fork, /*name*/ None);
             }
+            SlashCommand::Merge if self.active_side_conversation => {
+                self.app_event_tx.send(AppEvent::FoldSideConversation);
+            }
             SlashCommand::Merge => self.request_conversation_merge(Vec::new()),
             SlashCommand::Tree => self.request_context_tree(None),
+            SlashCommand::Branch => self.request_context_branch(None),
+            SlashCommand::Context => self.request_context_mode(None),
             SlashCommand::Worktree => {
                 self.show_managed_worktree_picker();
             }
@@ -920,6 +925,28 @@ impl ChatWidget {
                     name: Some(trimmed.to_string()),
                 });
             }
+            SlashCommand::Branch if !trimmed.is_empty() => {
+                self.request_context_branch(Some(trimmed.to_string()));
+            }
+            SlashCommand::Context if !trimmed.is_empty() => {
+                self.request_context_mode(Some(trimmed.to_string()));
+            }
+            SlashCommand::Fork if trimmed.starts_with("--at") => match parse_fork_at(trimmed) {
+                Ok((turn, name)) => self.app_event_tx.send(AppEvent::ForkAtTurn { turn, name }),
+                Err(usage) => self.add_error_message(usage),
+            },
+            SlashCommand::Fork if trimmed.starts_with("--bg") => {
+                match parse_background_fork(trimmed) {
+                    Ok((name, worktree, prompt)) => {
+                        self.app_event_tx.send(AppEvent::ForkBackgroundBranch {
+                            name,
+                            worktree,
+                            prompt,
+                        });
+                    }
+                    Err(usage) => self.add_error_message(usage),
+                }
+            }
             SlashCommand::Fork if !trimmed.is_empty() => {
                 self.show_session_checkout_picker(
                     ManagedWorktreeMode::Fork,
@@ -1104,13 +1131,30 @@ impl ChatWidget {
                 self.app_event_tx
                     .send(AppEvent::ResumeSessionByIdOrName(args));
             }
+            SlashCommand::Merge if self.active_side_conversation => self.add_error_message(
+                "In a side conversation, /merge takes no arguments: it folds the side \
+                 conversation into its parent chat."
+                    .into(),
+            ),
             SlashCommand::Merge if !trimmed.is_empty() => match shlex::split(trimmed) {
                 Some(args) => self.request_conversation_merge(args),
                 None => self.add_error_message("Unclosed quote in /merge arguments.".into()),
             },
             SlashCommand::Tree if !trimmed.is_empty() => match shlex::split(trimmed) {
-                Some(args) if args.len() == 1 => self.request_context_tree(args.into_iter().next()),
-                _ => self.add_error_message("Usage: /tree [THREAD_ID]".into()),
+                Some(args) => match tree_args(args) {
+                    Some((name, false)) => self.request_context_tree(Some(name)),
+                    Some((name, true)) => match self.thread_id {
+                        Some(thread_id) => self.app_event_tx.send(AppEvent::PreviewContextBranch {
+                            thread_id,
+                            branch: name,
+                        }),
+                        None => self.add_error_message(
+                            "Session is still starting; try /tree again in a moment.".into(),
+                        ),
+                    },
+                    None => self.add_error_message("Usage: /tree [NAME [--show]]".into()),
+                },
+                None => self.add_error_message("Unclosed quote in /tree arguments.".into()),
             },
             SlashCommand::Pets
                 if matches!(
@@ -1326,6 +1370,8 @@ impl ChatWidget {
             | SlashCommand::Fork
             | SlashCommand::Merge
             | SlashCommand::Tree
+            | SlashCommand::Branch
+            | SlashCommand::Context
             | SlashCommand::Init
             | SlashCommand::Compact
             | SlashCommand::Review
@@ -1400,6 +1446,24 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    fn request_context_branch(&mut self, name: Option<String>) {
+        let Some(thread_id) = self.thread_id else {
+            self.add_error_message("Session is still starting; try again in a moment.".into());
+            return;
+        };
+        self.app_event_tx
+            .send(AppEvent::ContextBranch { thread_id, name });
+    }
+
+    fn request_context_mode(&mut self, mode: Option<String>) {
+        let Some(thread_id) = self.thread_id else {
+            self.add_error_message("Session is still starting; try again in a moment.".into());
+            return;
+        };
+        self.app_event_tx
+            .send(AppEvent::ContextMode { thread_id, mode });
+    }
+
     fn request_context_tree(&mut self, target: Option<String>) {
         if self.active_side_conversation || self.blocks_direct_input {
             self.add_error_message("Run /tree from a main chat.".into());
@@ -1424,7 +1488,11 @@ impl ChatWidget {
     ) {
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: Some("Conversation tree".into()),
-            subtitle: Some("Forks are indented. Merge rows list every source. Type to search; Enter switches; Esc cancels.".into()),
+            subtitle: Some(
+                "Forks are indented under the branch they left. Type to search; Enter switches; \
+                 /tree NAME --show previews a branch."
+                    .into(),
+            ),
             items,
             is_searchable: true,
             search_placeholder: Some("Search branch name or ID".into()),
@@ -1501,5 +1569,122 @@ impl ChatWidget {
         ));
         self.bottom_pane.drain_pending_submission_state();
         false
+    }
+}
+
+/// Parses `/fork --bg [--worktree] [--name NAME] PROMPT` into the branch name, whether to use a
+/// worktree, and the prompt.
+fn parse_background_fork(args: &str) -> Result<(Option<String>, bool, String), String> {
+    const USAGE: &str = "Usage: /fork --bg [--worktree] [--name NAME] PROMPT";
+    let mut rest = args
+        .trim_start()
+        .strip_prefix("--bg")
+        .unwrap_or(args)
+        .trim_start();
+    let mut name = None;
+    let mut worktree = false;
+    loop {
+        if let Some(after) = rest.strip_prefix("--worktree") {
+            worktree = true;
+            rest = after.trim_start();
+        } else if let Some(after) = rest.strip_prefix("--name") {
+            let after = after.trim_start();
+            let end = after.find(char::is_whitespace).unwrap_or(after.len());
+            if end == 0 {
+                return Err(USAGE.to_string());
+            }
+            name = Some(after[..end].to_string());
+            rest = after[end..].trim_start();
+        } else {
+            break;
+        }
+    }
+    if rest.is_empty() {
+        return Err(USAGE.to_string());
+    }
+    Ok((name, worktree, rest.to_string()))
+}
+
+/// Parses `/tree NAME [--show]` into the branch and whether to preview it instead of switching.
+fn tree_args(args: Vec<String>) -> Option<(String, bool)> {
+    let mut show = false;
+    let mut names = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--show" | "-s" => show = true,
+            _ => names.push(arg),
+        }
+    }
+    match <[String; 1]>::try_from(names) {
+        Ok([name]) => Some((name, show)),
+        Err(_) => None,
+    }
+}
+
+/// Parses `/fork --at TURN [NAME]`.
+fn parse_fork_at(args: &str) -> Result<(usize, Option<String>), String> {
+    const USAGE: &str = "Usage: /fork --at TURN [NAME]";
+    let mut words = args
+        .trim_start()
+        .strip_prefix("--at")
+        .unwrap_or(args)
+        .split_whitespace();
+    let turn = words
+        .next()
+        .and_then(|turn| turn.parse::<usize>().ok())
+        .filter(|turn| *turn > 0)
+        .ok_or_else(|| USAGE.to_string())?;
+    let name = words.collect::<Vec<_>>().join(" ");
+    Ok((turn, (!name.is_empty()).then_some(name)))
+}
+
+#[cfg(test)]
+mod background_fork_tests {
+    use pretty_assertions::assert_eq;
+
+    use super::parse_background_fork;
+
+    #[test]
+    fn tree_arguments_name_a_branch_and_may_preview_it() {
+        let args = |args: &[&str]| args.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            super::tree_args(args(&["try-sqlite"])),
+            Some(("try-sqlite".to_string(), false))
+        );
+        assert_eq!(
+            super::tree_args(args(&["--show", "try-sqlite"])),
+            Some(("try-sqlite".to_string(), true))
+        );
+        assert_eq!(super::tree_args(args(&["a", "b"])), None);
+        assert_eq!(super::tree_args(args(&["--show"])), None);
+    }
+
+    #[test]
+    fn forks_at_a_turn_take_its_number_and_a_name() {
+        assert_eq!(
+            super::parse_fork_at("--at 3 try-sqlite"),
+            Ok((3, Some("try-sqlite".to_string())))
+        );
+        assert_eq!(super::parse_fork_at("--at 2"), Ok((2, None)));
+        assert!(super::parse_fork_at("--at 0").is_err());
+        assert!(super::parse_fork_at("--at two").is_err());
+    }
+
+    #[test]
+    fn background_forks_take_flags_then_the_prompt() {
+        assert_eq!(
+            parse_background_fork("--bg --worktree --name try-sqlite switch the cache to SQLite"),
+            Ok((
+                Some("try-sqlite".to_string()),
+                true,
+                "switch the cache to SQLite".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_background_fork("--bg run the benchmarks"),
+            Ok((None, false, "run the benchmarks".to_string()))
+        );
+        assert!(parse_background_fork("--bg --name").is_err());
+        assert!(parse_background_fork("--bg").is_err());
     }
 }

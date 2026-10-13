@@ -270,6 +270,8 @@ impl ChatWidget {
             terminal_title_animation_origin: Instant::now(),
             terminal_title_next_refresh: None,
             status_line_project_root_name_cache: None,
+            context_branch: None,
+            context_branch_pending: None,
             status_line_branch: None,
             status_line_branch_cwd: None,
             status_line_branch_pending: false,

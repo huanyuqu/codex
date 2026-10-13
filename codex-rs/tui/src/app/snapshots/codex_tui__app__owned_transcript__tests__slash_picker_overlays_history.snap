@@ -6,9 +6,9 @@ Transcript row 30: content behind the menu
 Transcript row 31: content behind the menu
 Transcript row 32: content behind the menu
 Transcript row 33: content behind the menu
-Transcript row 34: content behind the menu
 › /model     choose what model and reasoning effort to use
   /memories  configure memory use and generation
+  /merge     merge saved branches into this chat
   /mention   mention a file
   /mcp       list MCP tools; use /mcp verbose or /mcp login <name>
 

@@ -655,6 +655,46 @@ pub(crate) enum AppEvent {
         name: Option<String>,
     },
 
+    /// Fork the current chat after turn `turn`, counted from 1, and switch to the fork.
+    ForkAtTurn {
+        turn: usize,
+        name: Option<String>,
+    },
+
+    /// Fold the side conversation on screen into its parent chat and return to it.
+    FoldSideConversation,
+
+    /// Show what merging the branch `branch` into `thread_id` would add.
+    PreviewContextBranch {
+        thread_id: ThreadId,
+        branch: String,
+    },
+
+    /// Read the name of `thread_id`'s conversation branch for the status line.
+    RefreshContextBranchName {
+        thread_id: ThreadId,
+    },
+
+    /// Show the current chat's branch, or rename it when `name` is set.
+    ContextBranch {
+        thread_id: ThreadId,
+        name: Option<String>,
+    },
+
+    /// Show how the current chat manages its context, or switch it to `mode`.
+    ContextMode {
+        thread_id: ThreadId,
+        mode: Option<String>,
+    },
+
+    /// Fork the current session into a branch that works on `prompt` in the background, in a
+    /// new worktree when `worktree` is set, while this chat stays open.
+    ForkBackgroundBranch {
+        name: Option<String>,
+        worktree: bool,
+        prompt: String,
+    },
+
     /// Merge saved branches into the captured current thread. Empty args open a picker.
     MergeCurrentSession {
         primary_thread_id: ThreadId,

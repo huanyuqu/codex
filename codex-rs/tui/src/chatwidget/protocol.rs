@@ -110,6 +110,14 @@ impl ChatWidget {
                 }
             }
             ServerNotification::TurnCompleted(notification) => {
+                // A thread's first turn records its branch.
+                if self
+                    .context_branch
+                    .as_ref()
+                    .is_some_and(|(_, name)| name.is_none())
+                {
+                    self.invalidate_context_branch_name();
+                }
                 self.restore_realtime_transcripts_before_turn(&notification.turn.id);
                 self.handle_turn_completed_notification(notification, replay_kind);
             }
@@ -233,6 +241,7 @@ impl ChatWidget {
             ServerNotification::SkillsChanged(_) => {
                 self.refresh_skills_for_current_cwd(/*force_reload*/ true);
             }
+            ServerNotification::ContextGraphUpdated(_) => self.invalidate_context_branch_name(),
             ServerNotification::ModelRerouted(_) => {}
             ServerNotification::ModelVerification(notification) => {
                 self.on_app_server_model_verification(&notification.verifications)

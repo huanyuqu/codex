@@ -220,6 +220,7 @@ mod composer_hints;
 mod config_panel;
 mod config_persistence;
 mod connector_mentions;
+mod context_graph_branches;
 mod conversation_merge;
 mod daemon_menu;
 mod daybreak;
@@ -632,6 +633,8 @@ pub(crate) struct App {
     background_voice: Option<Box<ChatWidget>>,
     background_voice_error: Option<(ThreadId, String)>,
     temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
+    /// Branches forked to work in the background, by thread, with their names.
+    background_branches: HashMap<ThreadId, String>,
     /// Track title generation across thread switches and deduplicate automatic requests.
     pending_thread_titles: HashMap<(ThreadId, ThreadTitleDestination), CancellationToken>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,

@@ -231,6 +231,19 @@ impl App {
         {
             return;
         }
+        // Background branches report the end of their turns here and stay out of the routing of
+        // the chat that started them.
+        if let ServerNotificationThreadTarget::Thread(thread_id) =
+            server_notification_thread_target(&notification)
+            && Box::pin(self.handle_background_branch_notification(
+                app_server_client,
+                thread_id,
+                &notification,
+            ))
+            .await
+        {
+            return;
+        }
         // Hidden helper threads must not enter visible thread routing or overview refreshes.
         if let ServerNotificationThreadTarget::Thread(thread_id) =
             server_notification_thread_target(&notification)
@@ -695,6 +708,13 @@ impl App {
             return;
         }
 
+        if let Some(name) = thread_id.and_then(|thread_id| self.background_branches.get(&thread_id))
+        {
+            self.chat_widget.add_info_message(
+                format!("Background branch {name} is waiting for you."),
+                Some("/tree switches to it to answer.".into()),
+            );
+        }
         let background_voice = self.background_voice.as_ref().is_some_and(|owner| {
             owner.realtime_conversation_is_running()
                 && owner.thread_id().is_some()

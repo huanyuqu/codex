@@ -246,6 +246,10 @@ impl App {
         {
             return Ok(AppRunControl::Continue);
         }
+        if self.context_graph_branches_enabled() {
+            return Box::pin(self.merge_graph_branches(tui, app_server, primary_thread_id, args))
+                .await;
+        }
         if args.is_empty() {
             match merge_picker_items(app_server.request_handle(), primary_thread_id).await {
                 Ok(items) if !items.is_empty() => {
@@ -376,6 +380,10 @@ impl App {
             self.chat_widget
                 .add_error_message("/tree currently needs local saved chats.".into());
             return Ok(AppRunControl::Continue);
+        }
+        if self.context_graph_branches_enabled() {
+            return Box::pin(self.open_graph_tree(tui, app_server, current_thread_id, target))
+                .await;
         }
         let mut bridge = match MergeBridge::start(&self.config) {
             Ok(bridge) => bridge,

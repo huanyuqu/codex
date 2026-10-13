@@ -153,6 +153,9 @@ pub(crate) enum StatusLineItem {
     /// Current thread title, falling back to its identifier when unnamed.
     ThreadTitle,
 
+    /// Current branch of the conversation, as `/tree` names it.
+    ContextBranch,
+
     /// Current workspace notification headline.
     WorkspaceHeadline,
 
@@ -213,6 +216,9 @@ impl StatusLineItem {
             StatusLineItem::ThreadTitle => {
                 "Current thread title, or thread identifier when unnamed"
             }
+            StatusLineItem::ContextBranch => {
+                "Current branch of the conversation from /tree (omitted when not recorded)"
+            }
             StatusLineItem::WorkspaceHeadline => {
                 "Workspace notification headline (Enterprise workspaces only; omitted when unavailable)"
             }
@@ -253,6 +259,7 @@ impl StatusLineItem {
             StatusLineItem::RawOutput => StatusSurfacePreviewItem::RawOutput,
             StatusLineItem::ThreadName => StatusSurfacePreviewItem::ThreadName,
             StatusLineItem::ThreadTitle => StatusSurfacePreviewItem::ThreadTitle,
+            StatusLineItem::ContextBranch => StatusSurfacePreviewItem::ContextBranch,
             StatusLineItem::WorkspaceHeadline => StatusSurfacePreviewItem::WorkspaceHeadline,
             StatusLineItem::TaskProgress => StatusSurfacePreviewItem::TaskProgress,
         }

@@ -124,6 +124,7 @@ impl App {
                     | AppEvent::SelectAgentThread(_)
                     | AppEvent::StartSide { .. }
                     | AppEvent::ForkCurrentSession { .. }
+                    | AppEvent::ForkBackgroundBranch { .. }
                     | AppEvent::MergeCurrentSession { .. }
                     | AppEvent::OpenContextTree { .. }
                     | AppEvent::SwitchContextBranch { .. }
@@ -560,11 +561,37 @@ impl App {
                     .merge_current_session(tui, app_server, primary_thread_id, args)
                     .await;
             }
+            AppEvent::ForkAtTurn { turn, name } => {
+                return Box::pin(self.fork_at_turn(tui, app_server, turn, name)).await;
+            }
+            AppEvent::PreviewContextBranch { thread_id, branch } => {
+                Box::pin(self.preview_context_branch(app_server, thread_id, branch)).await;
+            }
+            AppEvent::RefreshContextBranchName { thread_id } => {
+                Box::pin(self.refresh_context_branch_name(app_server, thread_id)).await;
+            }
+            AppEvent::FoldSideConversation => {
+                return Box::pin(self.fold_side_conversation(tui, app_server)).await;
+            }
+            AppEvent::ContextBranch { thread_id, name } => {
+                Box::pin(self.context_branch(app_server, thread_id, name)).await;
+            }
+            AppEvent::ContextMode { thread_id, mode } => {
+                Box::pin(self.context_mode(app_server, thread_id, mode)).await;
+            }
+            AppEvent::ForkBackgroundBranch {
+                name,
+                worktree,
+                prompt,
+            } => {
+                return Box::pin(self.fork_background_branch(tui, app_server, name, worktree, prompt))
+                    .await;
+            }
             AppEvent::OpenContextTree { current_thread_id, target } => {
-                return self.open_context_tree(tui, app_server, current_thread_id, target).await;
+                return Box::pin(self.open_context_tree(tui, app_server, current_thread_id, target)).await;
             }
             AppEvent::SwitchContextBranch { current_thread_id, target_thread_id } => {
-                return self.switch_context_branch(tui, app_server, current_thread_id, target_thread_id).await;
+                return Box::pin(self.switch_context_branch(tui, app_server, current_thread_id, target_thread_id)).await;
             }
             AppEvent::ArchiveCurrentThread => {
                 return self.archive_current_thread(tui, app_server).await;
@@ -634,6 +661,11 @@ impl App {
                                     .await
                                 {
                                     Ok(()) => {
+                                        self.name_forked_branch(
+                                            app_server,
+                                            forked.session.thread_id,
+                                            name.clone(),
+                                        );
                                         forked.session.thread_name = Some(name);
                                         None
                                     }
@@ -807,6 +839,18 @@ impl App {
                         return Ok(AppRunControl::Continue);
                     }
                 };
+                if self.context_graph_branches_enabled()
+                    && self.config.context_graph.edit_creates_branch
+                {
+                    return Box::pin(self.edit_prompt_in_branch(
+                        tui,
+                        app_server,
+                        thread_id,
+                        before_turn_id,
+                        prompt,
+                    ))
+                    .await;
+                }
                 let reverted = match app_server.revert_thread(thread_id, before_turn_id, &retained_turns).await {
                     Ok(reverted) => reverted,
                     Err(err) => {

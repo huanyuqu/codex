@@ -1,0 +1,18 @@
+---
+source: tui/src/app/context_graph_branches.rs
+expression: "render_popup(&app, 90)"
+---
+
+  Conversation tree
+  Forks are indented under the branch they left. Type to search; Enter switches; /tree
+  NAME --show previews a branch.
+
+  Search branch name or ID
+
+› main (current)        4 turns · HTTP client retries · last: request of main
+  ├ try-sqlite          2 turns · last: request of try-sqlite · referenced by main
+  │ └ deeper            1 turn · last: request of deeper
+  └ old-try (disabled)  1 turn · last: request of old-try · rolled back (disabled: This
+                        history has no chat to open.)
+
+  enter select · esc back

@@ -1,0 +1,16 @@
+---
+source: tui/src/app/context_graph_branches.rs
+expression: text
+---
+Context mode: auto.
+Branch main of 4 in this conversation.
+Recent recalls:
+  7 blocks, about 5200 of 40000 tokens, 2.4s: why did the retry test fail
+---
+Context mode: auto.
+Branch main of 4 in this conversation.
+No recalled context yet.
+---
+Context mode: auto.
+Branch main of 4 in this conversation.
+Could not read recalled views: connection closed
