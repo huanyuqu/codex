@@ -471,22 +471,7 @@ pub fn render_view(
     view: &ContextView,
     options: RenderOptions,
 ) -> Vec<ResponseItem> {
-    let mut preamble = String::from(RECALL_NOTICE);
-    if !view.map.is_empty() {
-        preamble.push_str("\n\n## Earlier turns\n");
-        preamble.push_str(&view.map.join("\n"));
-    }
-    if !view.ledger.is_empty() {
-        preamble.push_str("\n\n## Constraints and decisions\n");
-        for claim in &view.ledger {
-            let kind = match claim.kind {
-                ClaimKind::UserConstraint => "user constraint",
-                _ => "decision",
-            };
-            preamble.push_str(&format!("- ({kind}, turn {}) {}\n", claim.turn, claim.text));
-        }
-    }
-    let mut items = vec![developer_message(preamble.trim_end())];
+    let mut items = vec![developer_message(&preamble(view))];
 
     let mut notes = String::new();
     for entry in &view.entries {
@@ -517,6 +502,26 @@ pub fn render_view(
     items
 }
 
+/// The notice, the turn map and the ledger.
+fn preamble(view: &ContextView) -> String {
+    let mut preamble = String::from(RECALL_NOTICE);
+    if !view.map.is_empty() {
+        preamble.push_str("\n\n## Earlier turns\n");
+        preamble.push_str(&view.map.join("\n"));
+    }
+    if !view.ledger.is_empty() {
+        preamble.push_str("\n\n## Constraints and decisions\n");
+        for claim in &view.ledger {
+            let kind = match claim.kind {
+                ClaimKind::UserConstraint => "user constraint",
+                _ => "decision",
+            };
+            preamble.push_str(&format!("- ({kind}, turn {}) {}\n", claim.turn, claim.text));
+        }
+    }
+    preamble.trim_end().to_string()
+}
+
 fn flush_notes(notes: &mut String, items: &mut Vec<ResponseItem>) {
     if !notes.is_empty() {
         items.push(developer_message(notes.trim_end()));
@@ -524,8 +529,20 @@ fn flush_notes(notes: &mut String, items: &mut Vec<ResponseItem>) {
     }
 }
 
+/// The view as one text transcript: the notice, map and ledger, then every shown block as text,
+/// recent turns included. For models that cannot replay recorded items, such as in offline
+/// evaluation with another provider's model.
+pub fn render_transcript(history: &History<'_>, view: &ContextView) -> String {
+    let mut transcript = preamble(view);
+    for entry in &view.entries {
+        transcript.push_str("\n\n");
+        transcript.push_str(&entry_text(history, entry));
+    }
+    transcript
+}
+
 /// A shown block as text: its card's title, then its summary, excerpt or full rendering.
-fn entry_text(history: &History<'_>, entry: &ViewEntry) -> String {
+pub fn entry_text(history: &History<'_>, entry: &ViewEntry) -> String {
     let block = history.block(entry.index);
     let card = block.card;
     let mut text = format!(

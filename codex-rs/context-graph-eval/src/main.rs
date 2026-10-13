@@ -1,6 +1,9 @@
 //! Indexes recorded rollouts into a context graph database, recalls from them, and reports what
 //! indexing and recall cost.
 
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +18,15 @@ use codex_context_graph::view::Presentation;
 use codex_context_graph::view::RenderOptions;
 use codex_context_graph::view::ViewLimits;
 use codex_context_graph::view::render_view;
+use codex_context_graph_eval::bench::Condition;
+use codex_context_graph_eval::bench::ContextBuilder;
+use codex_context_graph_eval::bench::ProbeResult;
+use codex_context_graph_eval::bench::answer_and_judge;
+use codex_context_graph_eval::probe::Probe;
+use codex_context_graph_eval::probe::append_jsonl;
+use codex_context_graph_eval::probe::build_generation_prompt;
+use codex_context_graph_eval::probe::parse_generated_probes;
+use codex_context_graph_eval::probe::read_jsonl;
 use codex_context_graph_eval::provider::Endpoint;
 use codex_context_graph_eval::provider::resolve_endpoint;
 use codex_context_graph_eval::responses::ResponsesModel;
@@ -30,6 +42,7 @@ use codex_context_graph_store::ShadowIndexer;
 use codex_context_graph_store::ShadowModel;
 use codex_state::SqliteConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use futures::StreamExt as _;
 
 #[derive(Debug, Parser)]
 #[command(about = "Evaluate context graph indexing and recall on recorded rollouts")]
@@ -48,6 +61,12 @@ enum Command {
     Index(IndexArgs),
     /// Choose the context for a question asked at some turn of a rollout.
     Recall(RecallArgs),
+    /// Write probe questions about rollouts with a strong model.
+    ProbeGen(ProbeGenArgs),
+    /// Ask probes under several contexts and grade the answers.
+    ProbeRun(ProbeRunArgs),
+    /// Summarize graded probe answers by condition and category.
+    ProbeReport(ProbeReportArgs),
     /// Print the stored cards of a graph as JSON lines.
     Cards {
         #[arg(long)]
@@ -162,6 +181,77 @@ struct RecallArgs {
     models: ModelArgs,
 }
 
+#[derive(Debug, clap::Args)]
+struct ProbeGenArgs {
+    /// Rollouts to write probes about; index them first so that recall can use model cards.
+    #[arg(required = true)]
+    rollouts: Vec<PathBuf>,
+
+    /// Generating model.
+    #[arg(long)]
+    model: String,
+
+    /// Probes per rollout.
+    #[arg(long, default_value_t = 6)]
+    count: usize,
+
+    /// Ask the probes after this turn. Defaults to the last turn.
+    #[arg(long)]
+    turn: Option<usize>,
+
+    /// JSON-lines file the probes are appended to.
+    #[arg(long)]
+    out: PathBuf,
+
+    #[command(flatten)]
+    models: ModelArgs,
+}
+
+#[derive(Debug, clap::Args)]
+struct ProbeRunArgs {
+    #[arg(long)]
+    probes: PathBuf,
+
+    /// Comma-separated conditions: full, window, bm25, oracle, recall:SCREEN[+READ|+none].
+    #[arg(long, value_delimiter = ',')]
+    conditions: Vec<String>,
+
+    #[arg(long)]
+    answer_model: String,
+
+    #[arg(long)]
+    judge_model: String,
+
+    /// JSON-lines file results are appended to; probes and conditions it has are skipped.
+    #[arg(long)]
+    out: PathBuf,
+
+    #[arg(long, default_value_t = 4)]
+    concurrency: usize,
+
+    #[arg(long, default_value_t = 40_000)]
+    budget: u32,
+
+    #[arg(long, default_value_t = 2)]
+    recent_turns: usize,
+
+    #[arg(long, default_value_t = 200_000)]
+    max_full_tokens: u32,
+
+    #[command(flatten)]
+    models: ModelArgs,
+}
+
+#[derive(Debug, clap::Args)]
+struct ProbeReportArgs {
+    #[arg(long)]
+    results: PathBuf,
+
+    /// Count only probes that the oracle context answers correctly.
+    #[arg(long)]
+    valid_only: bool,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -179,6 +269,9 @@ async fn main() -> anyhow::Result<()> {
     match args.command {
         Command::Index(index_args) => index(&store, index_args).await,
         Command::Recall(recall_args) => recall(&store, recall_args).await,
+        Command::ProbeGen(probe_args) => probe_gen(&store, probe_args).await,
+        Command::ProbeRun(run_args) => probe_run(&store, run_args).await,
+        Command::ProbeReport(report_args) => probe_report(&report_args),
         Command::Cards { graph } => {
             for card in store.load_cards(&graph).await? {
                 println!("{}", serde_json::to_string(&card)?);
@@ -364,6 +457,239 @@ async fn recall(store: &LocalContextGraphStore, args: RecallArgs) -> anyhow::Res
             }
         }
         println!("[user]\n{}", args.question);
+    }
+    Ok(())
+}
+
+async fn probe_gen(store: &LocalContextGraphStore, args: ProbeGenArgs) -> anyhow::Result<()> {
+    let endpoint = args.models.endpoint()?;
+    let model = args.models.model(&endpoint, &args.model)?;
+    let existing: Vec<Probe> = read_jsonl(&args.out)?;
+    for path in &args.rollouts {
+        let session = Session::load(store, path).await?;
+        let history = session.history(args.turn);
+        let turn = history.last_turn();
+        let prompt = build_generation_prompt(&history, args.count);
+        let started = Instant::now();
+        let completion = match model.complete(&prompt.prompt).await {
+            Ok(completion) => completion,
+            Err(err) => {
+                eprintln!("{}: generation failed: {err:#}", session.graph_id);
+                continue;
+            }
+        };
+        let generated = match parse_generated_probes(&prompt, &history, &completion.text) {
+            Ok(generated) => generated,
+            Err(err) => {
+                eprintln!("{}: {err}", session.graph_id);
+                continue;
+            }
+        };
+        let prefix = format!("{}#{turn}#", session.graph_id);
+        let first = existing
+            .iter()
+            .filter(|probe| probe.id.starts_with(&prefix))
+            .count();
+        for (offset, fields) in generated.into_iter().enumerate() {
+            let probe = Probe {
+                id: format!("{prefix}{}", first + offset),
+                rollout: path.clone(),
+                graph_id: session.graph_id.clone(),
+                turn,
+                category: fields.category,
+                question: fields.question,
+                answer: fields.answer,
+                key_facts: fields.key_facts,
+                support: fields.support,
+                outdated: fields.outdated,
+                generator: args.model.clone(),
+            };
+            append_jsonl(&args.out, &probe)?;
+            println!("{} [{}] {}", probe.id, probe.category, probe.question);
+        }
+        eprintln!(
+            "{}: {} input, {} output tokens, {:.1}s",
+            session.graph_id,
+            completion.input_tokens,
+            completion.output_tokens,
+            started.elapsed().as_secs_f64()
+        );
+    }
+    Ok(())
+}
+
+async fn probe_run(store: &LocalContextGraphStore, args: ProbeRunArgs) -> anyhow::Result<()> {
+    let probes: Vec<Probe> = read_jsonl(&args.probes)?;
+    let done: HashSet<(String, String)> = read_jsonl::<ProbeResult>(&args.out)?
+        .into_iter()
+        .map(|result| (result.probe_id, result.condition))
+        .collect();
+    let conditions = args
+        .conditions
+        .iter()
+        .map(|name| name.parse::<Condition>())
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let mut sessions: HashMap<PathBuf, Session> = HashMap::new();
+    for probe in &probes {
+        if !sessions.contains_key(&probe.rollout) {
+            let session = Session::load(store, &probe.rollout).await?;
+            sessions.insert(probe.rollout.clone(), session);
+        }
+    }
+
+    let endpoint = args.models.endpoint()?;
+    let answer_model = args.models.model(&endpoint, &args.answer_model)?;
+    let judge_model = args.models.model(&endpoint, &args.judge_model)?;
+    let config = RecallConfig {
+        view: ViewLimits {
+            budget_tokens: args.budget,
+            recent_turns: args.recent_turns,
+            ..ViewLimits::default()
+        },
+        ..RecallConfig::default()
+    };
+    let mut recallers: HashMap<String, Recaller> = HashMap::new();
+    for condition in &conditions {
+        if let Condition::Recall { screen, read } = condition {
+            let read = match read {
+                Some(read) => Some(args.models.model(&endpoint, read)?),
+                None => None,
+            };
+            recallers.insert(
+                condition.to_string(),
+                Recaller::new(args.models.model(&endpoint, screen)?, read, config),
+            );
+        }
+    }
+    let builder = ContextBuilder {
+        config,
+        max_full_tokens: args.max_full_tokens,
+    };
+
+    let tasks: Vec<(&Probe, &Condition)> = probes
+        .iter()
+        .flat_map(|probe| conditions.iter().map(move |condition| (probe, condition)))
+        .filter(|(probe, condition)| !done.contains(&(probe.id.clone(), condition.to_string())))
+        .collect();
+    let total = tasks.len();
+    eprintln!("{total} answers to run");
+    let mut results = futures::stream::iter(tasks.into_iter().map(|(probe, condition)| {
+        let sessions = &sessions;
+        let recallers = &recallers;
+        let builder = &builder;
+        let answer_model = &answer_model;
+        let judge_model = &judge_model;
+        async move {
+            let result = async {
+                let session = sessions.get(&probe.rollout).context("session not loaded")?;
+                let history = session.history(Some(probe.turn));
+                let recaller = recallers.get(&condition.to_string());
+                let context = builder.build(condition, &history, probe, recaller).await?;
+                answer_and_judge(probe, condition, context, answer_model, judge_model).await
+            }
+            .await;
+            (probe, condition, result)
+        }
+    }))
+    .buffer_unordered(args.concurrency.max(1));
+    let mut finished = 0;
+    while let Some((probe, condition, result)) = results.next().await {
+        finished += 1;
+        match result {
+            Ok(result) => {
+                append_jsonl(&args.out, &result)?;
+                println!(
+                    "[{finished}/{total}] {} {condition}: {} ({} context tokens)",
+                    probe.id, result.verdict, result.context_tokens
+                );
+            }
+            Err(err) => eprintln!("[{finished}/{total}] {} {condition}: {err:#}", probe.id),
+        }
+    }
+    Ok(())
+}
+
+fn probe_report(args: &ProbeReportArgs) -> anyhow::Result<()> {
+    let results: Vec<ProbeResult> = read_jsonl(&args.results)?;
+    let valid: Option<HashSet<&str>> = args.valid_only.then(|| {
+        results
+            .iter()
+            .filter(|result| result.condition == "oracle" && result.verdict == "correct")
+            .map(|result| result.probe_id.as_str())
+            .collect()
+    });
+    let results: Vec<&ProbeResult> = results
+        .iter()
+        .filter(|result| {
+            valid
+                .as_ref()
+                .is_none_or(|valid| valid.contains(result.probe_id.as_str()))
+        })
+        .collect();
+    let mut by_condition: BTreeMap<&str, Vec<&ProbeResult>> = BTreeMap::new();
+    for result in &results {
+        by_condition
+            .entry(result.condition.as_str())
+            .or_default()
+            .push(result);
+    }
+    println!(
+        "{:<28} {:>4} {:>6} {:>8} {:>9} {:>8} {:>9} {:>8}",
+        "condition", "n", "score", "correct", "ctx tok", "support", "detailed", "outdated"
+    );
+    for (condition, results) in &by_condition {
+        let n = results.len() as f64;
+        let mean =
+            |value: fn(&ProbeResult) -> f64| results.iter().map(|r| value(r)).sum::<f64>() / n;
+        println!(
+            "{condition:<28} {:>4} {:>6.3} {:>8.3} {:>9.0} {:>8.3} {:>9.3} {:>8}",
+            results.len(),
+            mean(ProbeResult::score),
+            mean(|result| f64::from(u8::from(result.verdict == "correct"))),
+            mean(|result| f64::from(result.context_tokens)),
+            mean(|result| result.support_shown),
+            mean(|result| result.support_detailed),
+            results
+                .iter()
+                .map(|result| result.outdated_unmarked)
+                .sum::<usize>(),
+        );
+    }
+    let categories: Vec<&str> = {
+        let mut categories: Vec<&str> = results
+            .iter()
+            .map(|result| result.category.as_str())
+            .collect();
+        categories.sort_unstable();
+        categories.dedup();
+        categories
+    };
+    println!(
+        "
+score by category"
+    );
+    print!("{:<28}", "condition");
+    for category in &categories {
+        print!(" {category:>11}");
+    }
+    println!();
+    for (condition, results) in &by_condition {
+        print!("{condition:<28}");
+        for category in &categories {
+            let scores: Vec<f64> = results
+                .iter()
+                .filter(|result| result.category == *category)
+                .map(|result| result.score())
+                .collect();
+            if scores.is_empty() {
+                print!(" {:>11}", "-");
+            } else {
+                let mean = scores.iter().sum::<f64>() / scores.len() as f64;
+                print!(" {:>6.2} ({:>2})", mean, scores.len());
+            }
+        }
+        println!();
     }
     Ok(())
 }
