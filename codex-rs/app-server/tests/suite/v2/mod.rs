@@ -135,6 +135,7 @@ mod sleep;
 mod sqlite_recovery;
 mod thread_archive;
 mod thread_attachments;
+mod thread_background_terminals;
 mod thread_delete;
 mod thread_environments;
 mod thread_fork;
