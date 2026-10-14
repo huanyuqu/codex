@@ -70,6 +70,12 @@ pub fn create_branch_merge_tool() -> ToolSpec {
             ),
         ),
         (
+            "goal".to_string(),
+            JsonSchema::string(Some(
+                "What you need from the branch; a synthesized note focuses on it.".to_string(),
+            )),
+        ),
+        (
             "wait_seconds".to_string(),
             JsonSchema::integer(Some(
                 "How long to wait for a branch that is still working before giving up. \

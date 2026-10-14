@@ -379,6 +379,19 @@ pub enum BranchCompletion {
     Fold,
 }
 
+/// How recall screens the cards of the history.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum RecallScreen {
+    /// The screening model reads the cards of the whole history and chooses.
+    #[default]
+    Listwise,
+    /// Each card is scored on its own, by the rerank endpoint or the screening model.
+    Pointwise,
+    /// Scores narrow the cards down, then the screening model chooses among the best.
+    Cascade,
+}
+
 /// Context graph settings loaded from config.toml.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -392,6 +405,19 @@ pub struct ContextGraphToml {
     /// Model that reads blocks whose cards were not enough to decide. Defaults to the screening
     /// model; `"none"` skips reading.
     pub read_model: Option<String>,
+    /// Stronger model that screens again when the first screening is unsure. Unset, recall
+    /// keeps the first screening.
+    pub escalate_model: Option<String>,
+    /// How recall screens the cards: `listwise` (default), `pointwise` or `cascade`.
+    pub screen: Option<RecallScreen>,
+    /// Rerank endpoint, in the common `/rerank` format, that scores cards for `pointwise` and
+    /// `cascade` screening. Recall sends it the text of the cards. Without one, the screening
+    /// model scores them.
+    pub rerank_url: Option<String>,
+    /// Model name sent to the rerank endpoint.
+    pub rerank_model: Option<String>,
+    /// Environment variable that holds the rerank endpoint's API key.
+    pub rerank_api_key_env: Option<String>,
     /// Token budget of a recalled context.
     #[schemars(range(min = 1000))]
     pub recall_budget_tokens: Option<u32>,
@@ -423,6 +449,11 @@ pub struct ContextGraphConfig {
     pub index_model: Option<String>,
     pub screen_model: Option<String>,
     pub read_model: Option<String>,
+    pub escalate_model: Option<String>,
+    pub screen: RecallScreen,
+    pub rerank_url: Option<String>,
+    pub rerank_model: Option<String>,
+    pub rerank_api_key_env: Option<String>,
     pub recall_budget_tokens: u32,
     pub recent_turns: usize,
     pub soft_limit_percent: u8,
@@ -439,6 +470,11 @@ impl Default for ContextGraphConfig {
             index_model: None,
             screen_model: None,
             read_model: None,
+            escalate_model: None,
+            screen: RecallScreen::Listwise,
+            rerank_url: None,
+            rerank_model: None,
+            rerank_api_key_env: None,
             recall_budget_tokens: 40_000,
             recent_turns: 2,
             soft_limit_percent: 50,
@@ -458,6 +494,11 @@ impl From<ContextGraphToml> for ContextGraphConfig {
             index_model: toml.index_model,
             screen_model: toml.screen_model,
             read_model: toml.read_model,
+            escalate_model: toml.escalate_model,
+            screen: toml.screen.unwrap_or(defaults.screen),
+            rerank_url: toml.rerank_url,
+            rerank_model: toml.rerank_model,
+            rerank_api_key_env: toml.rerank_api_key_env,
             recall_budget_tokens: toml
                 .recall_budget_tokens
                 .unwrap_or(defaults.recall_budget_tokens)

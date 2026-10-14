@@ -1442,6 +1442,10 @@
           "description": "Whether editing a past prompt continues in a new branch, keeping the original conversation, instead of rewinding it.",
           "type": "boolean"
         },
+        "escalate_model": {
+          "description": "Stronger model that screens again when the first screening is unsure. Unset, recall keeps the first screening.",
+          "type": "string"
+        },
         "index_model": {
           "description": "Model that writes block cards. Defaults to the provider's memory extraction model.",
           "type": "string"
@@ -1491,6 +1495,26 @@
           "maximum": 20.0,
           "minimum": 1.0,
           "type": "integer"
+        },
+        "rerank_api_key_env": {
+          "description": "Environment variable that holds the rerank endpoint's API key.",
+          "type": "string"
+        },
+        "rerank_model": {
+          "description": "Model name sent to the rerank endpoint.",
+          "type": "string"
+        },
+        "rerank_url": {
+          "description": "Rerank endpoint, in the common `/rerank` format, that scores cards for `pointwise` and `cascade` screening. Recall sends it the text of the cards. Without one, the screening model scores them.",
+          "type": "string"
+        },
+        "screen": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/RecallScreen"
+            }
+          ],
+          "description": "How recall screens the cards: `listwise` (default), `pointwise` or `cascade`."
         },
         "screen_model": {
           "description": "Model that screens cards to choose context. Defaults to the indexing model.",
@@ -4212,6 +4236,32 @@
           "description": "Option to disable reasoning summaries.",
           "enum": [
             "none"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "RecallScreen": {
+      "description": "How recall screens the cards of the history.",
+      "oneOf": [
+        {
+          "description": "The screening model reads the cards of the whole history and chooses.",
+          "enum": [
+            "listwise"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Each card is scored on its own, by the rerank endpoint or the screening model.",
+          "enum": [
+            "pointwise"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Scores narrow the cards down, then the screening model chooses among the best.",
+          "enum": [
+            "cascade"
           ],
           "type": "string"
         }

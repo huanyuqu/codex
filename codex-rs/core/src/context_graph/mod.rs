@@ -1,6 +1,8 @@
 //! The context graph of a session: the shadow agent's models, recall of the history the model
 //! sees, and the tools that let the agent read history that recall left out.
 
+mod browse;
+mod code_merge;
 mod lease;
 mod mentions;
 mod merge;
@@ -10,21 +12,31 @@ mod recall;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use anyhow::Context as _;
 use codex_config::types::ContextGraphConfig;
 use codex_config::types::ContextMode;
+use codex_config::types::RecallScreen;
 use codex_context_graph::BlockId;
 use codex_context_graph_store::BranchSnapshot;
 use codex_context_graph_store::BranchTree;
+use codex_context_graph_store::CardsListener;
 use codex_context_graph_store::GraphMembership;
 use codex_context_graph_store::LiveContextGraph;
 use codex_context_graph_store::LiveIndexing;
 use codex_context_graph_store::LocalContextGraphStore;
+use codex_context_graph_store::ModelScorer;
+use codex_context_graph_store::RelevanceScorer;
+use codex_context_graph_store::RerankScorer;
 use codex_context_graph_store::ShadowModel;
 use codex_context_graph_store::install_live_recorder;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::ContextGraphCardsIndexedEvent;
+use codex_protocol::protocol::Event;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
 use codex_rollout::RolloutItem;
 use codex_thread_store::LiveThread;
@@ -34,12 +46,21 @@ use tracing::warn;
 use crate::config::Config;
 use crate::session::session::Session;
 
+pub use browse::ContextBlockText;
 pub(crate) use lease::acquire_workspace_lease;
 pub(crate) use mentions::resolve_branch_mentions;
+pub(crate) use merge::MergeOptions;
 pub(crate) use merge::PreparedMerge;
 pub(crate) use model::SessionShadowModel;
 pub(crate) use recall::RecallTrigger;
 pub(crate) use recall::recall_into_history;
+
+/// The agent that spawned a thread without giving it the conversation's history.
+#[derive(Debug, Clone)]
+pub(crate) struct SpawnedBy {
+    pub(crate) parent: ThreadId,
+    pub(crate) nickname: Option<String>,
+}
 
 /// What a session gets from [`start`]: the services recall needs, and the models to connect to
 /// the session once it exists.
@@ -72,7 +93,9 @@ pub(crate) async fn start(
     live_thread: Option<&LiveThread>,
     initial_items: &[RolloutItem],
     root_session: bool,
+    spawned_by: Option<SpawnedBy>,
     threads: Arc<dyn ThreadStore>,
+    events: async_channel::Sender<Event>,
 ) -> ContextGraphStart {
     let mut start = ContextGraphStart {
         service: None,
@@ -97,23 +120,50 @@ pub(crate) async fn start(
     let thread = thread_id.to_string();
     let parent = forked_from.map(|parent| parent.to_string());
     let membership = match LocalContextGraphStore::open(&config.sqlite).await {
-        Ok(store) => store
-            .membership_for_thread(&thread, parent.as_deref())
-            .await
-            .unwrap_or_else(|err| {
-                warn!("context graph membership lookup failed: {err:#}");
-                GraphMembership::root(&thread)
-            }),
+        Ok(store) => match (&parent, spawned_by) {
+            // An agent spawned without the history joins its parent's graph as a branch of its
+            // own.
+            (None, Some(spawned_by)) => {
+                store
+                    .membership_for_spawned_thread(
+                        &thread,
+                        &spawned_by.parent.to_string(),
+                        spawned_by.nickname.as_deref(),
+                    )
+                    .await
+            }
+            _ => {
+                store
+                    .membership_for_thread(&thread, parent.as_deref())
+                    .await
+            }
+        }
+        .unwrap_or_else(|err| {
+            warn!("context graph membership lookup failed: {err:#}");
+            GraphMembership::root(&thread)
+        }),
         Err(err) => {
             warn!("context graph store unavailable: {err:#}");
             GraphMembership::root(&thread)
         }
     };
+    let graph_id = membership.graph_id.clone();
+    let on_cards: CardsListener = Arc::new(move |blocks| {
+        // Clients refresh what they show of the graph; a closed session has no one to tell.
+        let _ = events.try_send(Event {
+            id: String::new(),
+            msg: EventMsg::ContextGraphCardsIndexed(ContextGraphCardsIndexedEvent {
+                graph_id: graph_id.clone(),
+                blocks: u32::try_from(blocks).unwrap_or(u32::MAX),
+            }),
+        });
+    });
     let indexing = LiveIndexing {
         model: index_model
             .clone()
             .map(|model| -> Arc<dyn ShadowModel> { model }),
         config: Default::default(),
+        on_cards: Some(on_cards),
     };
     let Some(live) = install_live_recorder(
         live_thread,
@@ -146,6 +196,25 @@ pub(crate) async fn start(
         Some(name) if name != screen_name => Some(model(name)),
         _ => Some(Arc::clone(&screen_model)),
     };
+    let escalate_model = settings
+        .escalate_model
+        .as_deref()
+        .filter(|name| *name != screen_name)
+        .map(&mut model);
+    let scorer: Option<Arc<dyn RelevanceScorer>> = match settings.screen {
+        RecallScreen::Listwise => None,
+        RecallScreen::Pointwise | RecallScreen::Cascade => Some(match &settings.rerank_url {
+            Some(url) => Arc::new(RerankScorer::new(
+                url.clone(),
+                settings.rerank_model.clone(),
+                settings
+                    .rerank_api_key_env
+                    .as_deref()
+                    .and_then(|name| std::env::var(name).ok()),
+            )),
+            None => Arc::new(ModelScorer::new(screen_model.clone())),
+        }),
+    };
     start.service = Some(Arc::new(ContextGraphService {
         live,
         threads,
@@ -153,8 +222,11 @@ pub(crate) async fn start(
         config: settings.clone(),
         screen_model,
         read_model,
+        escalate_model,
+        scorer,
         recalled_references: StdMutex::new(None),
         window: StdMutex::new(None),
+        rebuild_requested: AtomicBool::new(false),
     }));
     start
 }
@@ -206,11 +278,17 @@ pub(crate) struct ContextGraphService {
     config: ContextGraphConfig,
     screen_model: Arc<SessionShadowModel>,
     read_model: Option<Arc<SessionShadowModel>>,
+    /// Screens again when the first screening is unsure.
+    escalate_model: Option<Arc<SessionShadowModel>>,
+    /// Judges cards for pointwise and cascade screening.
+    scorer: Option<Arc<dyn RelevanceScorer>>,
     /// How many branches the history referenced when it was last recalled.
     recalled_references: StdMutex<Option<usize>>,
     /// What the context window holds since the last recall rebuilt it; `None` while the window
     /// holds the whole history, such as before the first recall or after summary compaction.
     window: StdMutex<Option<RecalledWindow>>,
+    /// Whether the user asked to rebuild the history by recall before the next turn.
+    rebuild_requested: AtomicBool,
 }
 
 /// The blocks a recalled context window holds.
@@ -281,6 +359,16 @@ impl ContextGraphService {
     /// Whether recall replaces summary compaction in this session.
     pub(crate) fn recalls(&self) -> bool {
         self.mode() != ContextMode::Full
+    }
+
+    /// Asks for the history to be rebuilt by recall before the next turn.
+    pub(crate) fn request_rebuild(&self) {
+        self.rebuild_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a rebuild was asked for, clearing the request.
+    pub(crate) fn take_rebuild_request(&self) -> bool {
+        self.rebuild_requested.swap(false, Ordering::SeqCst)
     }
 
     pub(crate) fn window(&self) -> Option<RecalledWindow> {

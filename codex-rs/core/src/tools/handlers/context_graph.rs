@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use codex_context_graph::BlockId;
 use codex_context_graph::lookup::expand_block;
 use codex_context_graph::lookup::expand_turn;
 use codex_context_graph::lookup::search_history;
@@ -18,6 +19,7 @@ use serde_json::json;
 
 use crate::agent::status::is_final;
 use crate::context_graph::ContextGraphService;
+use crate::context_graph::MergeOptions;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::tools::context::FunctionToolOutput;
@@ -153,8 +155,20 @@ impl ToolExecutor<ToolInvocation> for ContextExpandHandler {
             let snapshot = snapshot(&invocation.session).await?;
             let history = snapshot.history(/*until_turn*/ None);
             let text = match (block_id, turn) {
-                (Some(block_id), _) => expand_block(&history, block_id.trim())
-                    .ok_or_else(|| format!("No block {block_id} in this conversation.")),
+                (Some(block_id), _) => {
+                    let text = expand_block(&history, block_id.trim())
+                        .ok_or_else(|| format!("No block {block_id} in this conversation."));
+                    // What the model had to read tells how well recall chose.
+                    if text.is_ok()
+                        && let Some(index) =
+                            history.position(&BlockId::from_stored(block_id.trim()))
+                    {
+                        service(&invocation.session)?
+                            .note_expanded(&history, index)
+                            .await;
+                    }
+                    text
+                }
                 (None, Some(turn)) => expand_turn(&history, turn, MAX_TURN_CHARS)
                     .ok_or_else(|| format!("No turn {turn} in this conversation.")),
                 (None, None) => Err("Give block_id or turn.".to_string()),
@@ -214,6 +228,7 @@ struct BranchCreateArgs {
 struct BranchMergeArgs {
     branch: String,
     mode: Option<String>,
+    goal: Option<String>,
     wait_seconds: Option<u64>,
 }
 
@@ -291,6 +306,7 @@ impl ToolExecutor<ToolInvocation> for BranchMergeHandler {
             let BranchMergeArgs {
                 branch,
                 mode,
+                goal,
                 wait_seconds,
             } = parse_arguments(&arguments(invocation.payload, BRANCH_MERGE_TOOL_NAME)?)?;
             let mode = match mode.as_deref().map(str::trim) {
@@ -337,8 +353,12 @@ impl ToolExecutor<ToolInvocation> for BranchMergeHandler {
                     row.name
                 )));
             }
-            let merge = service
-                .prepare_merge(&row.name, mode)
+            let options = MergeOptions {
+                mode,
+                goal,
+                code: false,
+            };
+            let merge = Box::pin(service.prepare_merges(std::slice::from_ref(&row.name), &options))
                 .await
                 .map_err(|err| FunctionCallError::RespondToModel(format!("{err:#}")))?;
             // The note enters the history right after this call's output.
@@ -360,7 +380,8 @@ impl ToolExecutor<ToolInvocation> for BranchMergeHandler {
             };
             Ok(text_output(format!(
                 "Merged branch {} ({} turns) as {how}, which follows in the conversation.",
-                merge.branch_name, merge.turns
+                merge.branch_names(),
+                merge.turns()
             )))
         })
     }

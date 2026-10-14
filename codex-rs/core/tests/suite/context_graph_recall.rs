@@ -79,7 +79,34 @@ async fn recall_mode_rebuilds_the_history_before_a_turn() -> Result<()> {
     });
     let test = builder.build(&server).await?;
     turn(&test.codex, FIRST_REQUEST).await?;
-    turn(&test.codex, SECOND_REQUEST).await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: SECOND_REQUEST.into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    // The view recall built is recorded, so the rollout shows what the model saw.
+    let recalled = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ContextViewRecalled(_))
+    })
+    .await;
+    let EventMsg::ContextViewRecalled(recalled) = recalled else {
+        unreachable!("waited for a recalled view");
+    };
+    assert!(recalled.rebuilt);
+    assert_eq!(recalled.question, SECOND_REQUEST);
+    // The first request is shown, as the task the conversation started with.
+    assert!(
+        recalled
+            .entries
+            .iter()
+            .any(|entry| entry.reason == "task_start" || entry.reason == "selected"),
+        "{recalled:?}"
+    );
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
 
     let requests = requests.requests();
     assert_eq!(requests.len(), 3);

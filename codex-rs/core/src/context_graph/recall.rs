@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codex_config::types::ContextMode;
+use codex_config::types::RecallScreen;
 use codex_context_graph::BlockKind;
 use codex_context_graph::history::History;
 use codex_context_graph::text::item_text;
@@ -23,7 +24,9 @@ use codex_context_graph::view::render_view;
 use codex_context_graph_store::BranchSnapshot;
 use codex_context_graph_store::Recall;
 use codex_context_graph_store::RecallConfig;
+use codex_context_graph_store::RecallFeedback;
 use codex_context_graph_store::Recaller;
+use codex_context_graph_store::ScreenStrategy;
 use codex_context_graph_store::ShadowModel;
 use codex_features::Feature;
 use codex_history::ResponseItemEnvelope;
@@ -32,6 +35,9 @@ use codex_protocol::items::ContextCompactionItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::ContextViewRecalledEntry;
+use codex_protocol::protocol::ContextViewRecalledEvent;
+use codex_protocol::protocol::EventMsg;
 use tracing::warn;
 
 use super::ContextGraphService;
@@ -138,9 +144,20 @@ impl ContextGraphService {
                 recent_turns,
                 ..ViewLimits::default()
             },
+            strategy: match self.config.screen {
+                RecallScreen::Listwise => ScreenStrategy::Listwise,
+                RecallScreen::Pointwise => ScreenStrategy::Pointwise,
+                RecallScreen::Cascade => ScreenStrategy::Cascade,
+            },
             ..RecallConfig::default()
         };
+        let escalate_model = self
+            .escalate_model
+            .clone()
+            .map(|model| -> Arc<dyn ShadowModel> { model });
         Recaller::new(screen_model, read_model, config)
+            .with_escalation(escalate_model)
+            .with_scorer(self.scorer.clone())
     }
 
     /// Recalls `history` for `question`, giving up after the configured timeout, and records the
@@ -183,6 +200,115 @@ impl ContextGraphService {
         Ok(recall)
     }
 
+    /// The record of a view recall built, for the rollout.
+    fn recalled_event(
+        &self,
+        question: &str,
+        recall: &Recall,
+        rebuilt: bool,
+    ) -> ContextViewRecalledEvent {
+        let membership = self.live.membership();
+        ContextViewRecalledEvent {
+            graph_id: membership.graph_id.clone(),
+            branch_id: membership.branch.to_string(),
+            question: question.to_string(),
+            selector: self.screen_model.name().to_string(),
+            rebuilt,
+            entries: recall
+                .view
+                .entries
+                .iter()
+                .map(|entry| ContextViewRecalledEntry {
+                    block_id: entry.block_id.to_string(),
+                    presentation: entry.presentation.name().to_string(),
+                    reason: entry.reason.name().to_string(),
+                    tokens: entry.tokens,
+                })
+                .collect(),
+            tokens: recall.view.tokens,
+            budget_tokens: recall.view.budget_tokens,
+            latency_ms: recall.stats.latency_ms,
+        }
+    }
+
+    /// The view recall would build for `question` now, without changing the history or
+    /// recording the view.
+    pub(crate) async fn preview_recall(&self, question: &str) -> anyhow::Result<RecallPreview> {
+        let snapshot = self.snapshot().await?;
+        let history = snapshot.history(/*until_turn*/ None);
+        let recall = self
+            .recaller(self.config.recall_budget_tokens, self.config.recent_turns)
+            .recall(&history, question)
+            .await?;
+        let titles = recall
+            .view
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.block_id.clone(),
+                    history.card(entry.index).title.trim().to_string(),
+                )
+            })
+            .collect();
+        Ok(RecallPreview {
+            selector: self.screen_model.name().to_string(),
+            recall,
+            titles,
+        })
+    }
+
+    /// Asks for the history to be rebuilt by recall before the next turn, and counts the
+    /// request.
+    pub(crate) async fn request_recall(&self) -> anyhow::Result<()> {
+        self.request_rebuild();
+        let membership = self.live.membership();
+        self.live
+            .store()
+            .await?
+            .record_recall_feedback(
+                &membership.graph_id,
+                &membership.branch,
+                RecallFeedback::Requested,
+                /*block*/ None,
+            )
+            .await
+    }
+
+    /// Counts that the model read the block at `index` of `history` with `context_expand`, and
+    /// whether recall had left it out of the window.
+    pub(crate) async fn note_expanded(&self, history: &History<'_>, index: usize) {
+        let block = history.card(index).block_id.clone();
+        let missed = self
+            .window()
+            .is_some_and(|window| !window.holds(&block, history.is_own(index)));
+        let membership = self.live.membership();
+        let store = match self.live.store().await {
+            Ok(store) => store,
+            Err(err) => {
+                warn!("could not count an expanded block: {err:#}");
+                return;
+            }
+        };
+        let mut kinds = vec![RecallFeedback::Expanded];
+        if missed {
+            kinds.push(RecallFeedback::Missed);
+        }
+        for kind in kinds {
+            if let Err(err) = store
+                .record_recall_feedback(
+                    &membership.graph_id,
+                    &membership.branch,
+                    kind,
+                    Some(&block),
+                )
+                .await
+            {
+                warn!("could not count an expanded block: {err:#}");
+            }
+        }
+    }
+
     /// Answers a `context_recall` request: the earlier blocks recall picks for `question`, as
     /// text.
     pub(crate) async fn recall_for_tool(&self, question: &str) -> anyhow::Result<String> {
@@ -211,6 +337,13 @@ impl ContextGraphService {
         }
         Ok(picked.join("\n\n"))
     }
+}
+
+/// The view recall would build for a request, with the titles of the blocks it shows.
+pub(crate) struct RecallPreview {
+    pub(crate) selector: String,
+    pub(crate) recall: Recall,
+    pub(crate) titles: std::collections::HashMap<codex_context_graph::BlockId, String>,
 }
 
 /// The request to recall for: `question`, or the latest user message without one.
@@ -293,7 +426,9 @@ pub(crate) async fn recall_into_history(
     let Some(service) = sess.services.context_graph.clone() else {
         return Ok(false);
     };
-    if !service.wants_recall(sess, step_context, trigger).await {
+    // A rebuild the user asked for runs whatever the mode.
+    let requested = trigger == RecallTrigger::TurnStart && service.take_rebuild_request();
+    if !requested && !service.wants_recall(sess, step_context, trigger).await {
         return Ok(false);
     }
     let snapshot = match service.snapshot().await {
@@ -310,6 +445,7 @@ pub(crate) async fn recall_into_history(
     let question = request_text(&history, question);
     let window = service.window();
     let incremental = trigger == RecallTrigger::TurnStart
+        && !requested
         && service.mode() == ContextMode::Recall
         && window.is_some();
     let turn_context = &step_context.turn;
@@ -340,6 +476,15 @@ pub(crate) async fn recall_into_history(
                 }
                 _ => None,
             };
+            sess.send_event(
+                turn_context,
+                EventMsg::ContextViewRecalled(service.recalled_event(
+                    &question,
+                    &recall,
+                    append.is_none(),
+                )),
+            )
+            .await;
             match append {
                 Some(missing) => {
                     append_recalled(

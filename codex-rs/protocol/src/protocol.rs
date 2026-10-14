@@ -1508,6 +1508,12 @@ pub enum EventMsg {
     /// Conversation history was compacted (either automatically or manually).
     ContextCompacted(ContextCompactedEvent),
 
+    /// Recall chose what the model sees of the conversation's context graph for a request.
+    ContextViewRecalled(ContextViewRecalledEvent),
+
+    /// The shadow agent wrote cards for blocks of the thread's context graph.
+    ContextGraphCardsIndexed(ContextGraphCardsIndexedEvent),
+
     /// Legacy persisted marker for dropping the last N user turns.
     /// Retained for replay of existing rollouts; live rollback operations are unsupported.
     ThreadRolledBack(ThreadRolledBackEvent),
@@ -2264,6 +2270,44 @@ pub struct SafetyBufferingEvent {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ContextCompactedEvent;
+
+/// A view recall built for a request: the record that makes the history the model saw
+/// auditable and reproducible.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ContextViewRecalledEvent {
+    pub graph_id: String,
+    pub branch_id: String,
+    /// The request recall chose context for.
+    pub question: String,
+    /// The model that screened the history.
+    pub selector: String,
+    /// Whether the view replaced the history; otherwise the blocks it lacked were appended.
+    pub rebuilt: bool,
+    pub entries: Vec<ContextViewRecalledEntry>,
+    /// Estimated tokens of the view.
+    pub tokens: u32,
+    pub budget_tokens: u32,
+    pub latency_ms: u64,
+}
+
+/// One block of a recalled view.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ContextViewRecalledEntry {
+    pub block_id: String,
+    /// How much of the block the view shows: `full`, `excerpt` or `summary`.
+    pub presentation: String,
+    /// Why the view shows it, such as `selected` or `recent`.
+    pub reason: String,
+    pub tokens: u32,
+}
+
+/// Cards were written for blocks of a thread's context graph.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ContextGraphCardsIndexedEvent {
+    pub graph_id: String,
+    /// How many blocks got cards.
+    pub blocks: u32,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct TurnCompleteEvent {

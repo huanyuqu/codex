@@ -160,6 +160,113 @@ async fn branch_tools_fork_a_branch_and_merge_its_work() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn branch_merge_synthesizes_a_cited_note_toward_a_goal() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    const NOTE_PROMPT: &str = "You write the note that merges branches";
+    const GOAL: &str = "decide what the release notes cover";
+    let server = start_mock_server().await;
+    mount_sse_once_match(
+        &server,
+        body(&[PLAN_REQUEST], &[TASK]),
+        sse(vec![
+            ev_function_call(
+                "call-create",
+                "branch_create",
+                &json!({ "name": "notes", "task": TASK }).to_string(),
+            ),
+            ev_completed("r1"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        body(&[TASK], &["Started branch notes", NOTE_PROMPT]),
+        sse(vec![
+            ev_assistant_message("m-branch", BRANCH_ANSWER),
+            ev_completed("r-branch"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        body(
+            &["Started branch notes"],
+            &["Merged branch notes", NOTE_PROMPT],
+        ),
+        sse(vec![
+            ev_function_call(
+                "call-merge",
+                "branch_merge",
+                &json!({ "branch": "notes", "mode": "synthesize", "goal": GOAL }).to_string(),
+            ),
+            ev_completed("r2"),
+        ]),
+    )
+    .await;
+    let synthesis = mount_sse_once_match(
+        &server,
+        body(&[NOTE_PROMPT, GOAL, BRANCH_ANSWER], &[]),
+        sse(vec![
+            ev_assistant_message(
+                "m-note",
+                &json!({ "note": "The branch wrote RELEASE.md [B1]; nothing is open [B99]." })
+                    .to_string(),
+            ),
+            ev_completed("r-note"),
+        ]),
+    )
+    .await;
+    let last = mount_sse_once_match(
+        &server,
+        body(&["Merged branch notes"], &[NOTE_PROMPT]),
+        sse(vec![
+            ev_assistant_message("m3", "The notes are in."),
+            ev_completed("r3"),
+        ]),
+    )
+    .await;
+
+    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    provider.base_url = Some(format!("{}/v1", server.uri()));
+    provider.supports_websockets = false;
+    let mut builder = test_codex().with_config(move |config| {
+        config.model = Some("gpt-5.2".to_string());
+        config.model_provider = provider;
+        config.context_graph.screen_model = Some("gpt-5.2".to_string());
+        enable_context_graph(config);
+    });
+    let test = builder.build(&server).await?;
+    test.submit_turn(PLAN_REQUEST).await?;
+
+    assert_eq!(synthesis.requests().len(), 1);
+    let requests = last.requests();
+    assert_eq!(requests.len(), 1);
+    let input = requests[0].body_json()["input"].to_string();
+    assert!(
+        input.contains("Branch \\\"notes\\\" merged into this conversation")
+            && input.contains("The branch wrote RELEASE.md [blk_")
+            && input.contains("nothing is open.")
+            && !input.contains("[B99]"),
+        "missing the synthesized note: {input}"
+    );
+
+    let store = LocalContextGraphStore::open(&test.config.sqlite).await?;
+    let thread_id = test.session_configured.thread_id.to_string();
+    let tree = store
+        .branch_tree(&thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the thread is not recorded"))?;
+    assert_eq!(
+        tree.merges
+            .iter()
+            .map(|merge| (merge.mode, merge.goal.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![(MergeMode::Synthesize, Some(GOAL))]
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resumed_threads_keep_recording_into_their_branch() -> Result<()> {
     skip_if_no_network!(Ok(()));

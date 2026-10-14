@@ -205,14 +205,44 @@ pub struct GuardianRootSnapshot {
     pub trusted_skill_paths: Vec<String>,
 }
 
-/// A branch merged into a thread.
+/// Branches merged into a thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextBranchMerge {
     pub graph_id: String,
+    pub merged: Vec<ContextBranchMerged>,
+}
+
+/// The view recall would build for a request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextRecallPreview {
+    /// The model that screened the history.
+    pub selector: String,
+    pub entries: Vec<ContextRecallEntry>,
+    pub tokens: u32,
+    pub budget_tokens: u32,
+    pub latency_ms: u64,
+}
+
+/// One block of a recalled view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextRecallEntry {
+    pub block_id: String,
+    pub title: String,
+    pub presentation: String,
+    pub reason: String,
+    pub tokens: u32,
+    pub note: Option<String>,
+}
+
+/// One branch a merge merged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextBranchMerged {
     pub branch_id: String,
     pub branch_name: String,
     /// User turns the merged branch added after it diverged.
     pub turns: usize,
+    /// The code merged from the branch's worktree.
+    pub code: Option<codex_context_graph_store::CodeMerge>,
 }
 
 pub struct CodexThread {
@@ -628,12 +658,15 @@ impl CodexThread {
         Ok(())
     }
 
-    /// Merges the branch `branch` names, a branch ID, a branch name or a thread ID, into this
-    /// thread: its note enters the history, and the merge is recorded in the context graph.
-    pub async fn merge_context_branch(
+    /// Merges the branches `branches` name, by branch ID, branch name or thread ID, into this
+    /// thread as one note: the note enters the history, and the merge is recorded in the context
+    /// graph. A saved chat outside the conversation joins it as a branch first.
+    pub async fn merge_context_branches(
         &self,
-        branch: &str,
+        branches: &[String],
         mode: codex_context_graph_store::MergeMode,
+        goal: Option<String>,
+        code: bool,
     ) -> anyhow::Result<ContextBranchMerge> {
         let service = self
             .session
@@ -641,17 +674,77 @@ impl CodexThread {
             .context_graph
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("this thread does not record a context graph"))?;
-        let merge = service.prepare_merge(branch, mode).await?;
+        let options = crate::context_graph::MergeOptions { mode, goal, code };
+        let merge = Box::pin(service.prepare_merges(branches, &options)).await?;
         self.inject_response_items(vec![merge.note.clone()])
             .await
             .map_err(|err| anyhow::anyhow!("failed to add the merge to the history: {err}"))?;
         service.commit_merge(&merge).await?;
         Ok(ContextBranchMerge {
             graph_id: merge.graph_id,
-            branch_id: merge.branch_id,
-            branch_name: merge.branch_name,
-            turns: merge.turns,
+            merged: merge
+                .merged
+                .into_iter()
+                .map(|merged| ContextBranchMerged {
+                    branch_id: merged.branch_id,
+                    branch_name: merged.branch_name,
+                    turns: merged.turns,
+                    code: merged.code,
+                })
+                .collect(),
         })
+    }
+
+    fn context_graph(&self) -> anyhow::Result<&crate::context_graph::ContextGraphService> {
+        self.session
+            .services
+            .context_graph
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("this thread does not record a context graph"))
+    }
+
+    /// The text of a block of this thread's conversation, from any of its branches.
+    pub async fn read_context_block(
+        &self,
+        block_id: &str,
+    ) -> anyhow::Result<crate::context_graph::ContextBlockText> {
+        self.context_graph()?.read_block(block_id).await
+    }
+
+    /// The view recall would build for `question` now, without changing the history.
+    pub async fn preview_context_recall(
+        &self,
+        question: &str,
+    ) -> anyhow::Result<ContextRecallPreview> {
+        let preview = Box::pin(self.context_graph()?.preview_recall(question)).await?;
+        let view = &preview.recall.view;
+        Ok(ContextRecallPreview {
+            selector: preview.selector,
+            entries: view
+                .entries
+                .iter()
+                .map(|entry| ContextRecallEntry {
+                    block_id: entry.block_id.to_string(),
+                    title: preview
+                        .titles
+                        .get(&entry.block_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    presentation: entry.presentation.name().to_string(),
+                    reason: entry.reason.name().to_string(),
+                    tokens: entry.tokens,
+                    note: entry.note.clone(),
+                })
+                .collect(),
+            tokens: view.tokens,
+            budget_tokens: view.budget_tokens,
+            latency_ms: preview.recall.stats.latency_ms,
+        })
+    }
+
+    /// Rebuilds the history by recall before the next turn.
+    pub async fn request_context_recall(&self) -> anyhow::Result<()> {
+        self.context_graph()?.request_recall().await
     }
 
     /// Persist whether this thread is eligible for future memory generation.

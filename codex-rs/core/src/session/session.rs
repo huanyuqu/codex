@@ -1247,7 +1247,15 @@ impl Session {
                 live_thread.as_ref(),
                 initial_history.get_rollout_items(),
                 !session_configuration.session_source.is_non_root_agent(),
+                session_configuration
+                    .session_source
+                    .parent_thread_id()
+                    .map(|parent| crate::context_graph::SpawnedBy {
+                        parent,
+                        nickname: session_configuration.session_source.get_nickname(),
+                    }),
                 Arc::clone(&thread_store),
+                tx_event.clone(),
             ))
             .await;
             let rollout_path = if let Some(live_thread) = live_thread.as_ref() {
