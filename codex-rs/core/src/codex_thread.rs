@@ -747,6 +747,13 @@ impl CodexThread {
         self.context_graph()?.request_recall().await
     }
 
+    /// Starts recalling, in the background, for `draft`, the request the user is writing, so
+    /// that the turn it starts need not wait for recall. Returns whether a recall started; none
+    /// does when the next turn would not recall or the draft is too short.
+    pub async fn prefetch_context_recall(&self, draft: &str) -> bool {
+        Box::pin(crate::context_graph::prefetch_recall(&self.session, draft)).await
+    }
+
     /// Persist whether this thread is eligible for future memory generation.
     pub async fn set_thread_memory_mode(&self, mode: ThreadMemoryMode) -> anyhow::Result<()> {
         self.session.set_thread_memory_mode(mode).await

@@ -98,6 +98,34 @@ enum JobKind {
     Request,
     /// The turn that just ended, ahead of the next request.
     Speculative,
+    /// A draft of the next request, as the user writes it.
+    Draft,
+}
+
+/// Drafts shorter than this, in characters, are not recalled for.
+const MIN_DRAFT_CHARS: usize = 8;
+
+/// `text` with its whitespace collapsed, to compare a draft with the request it became.
+fn normalized(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The background recalls of a session.
+#[derive(Default)]
+pub(crate) struct RecallJobs {
+    /// Recalls made ahead of the next request, newest first: for drafts of it, and as the last
+    /// turn ended.
+    ahead: Vec<RecallJob>,
+    /// The running turn's own recall, while it may still add to the turn.
+    request: Option<RecallJob>,
+    /// Recalls made ahead of the running turn's request that were still running when it
+    /// started, newest first.
+    stand_ins: Vec<RecallJob>,
+    /// Whether the running turn started without a recalled selection, so that a recall made
+    /// ahead of it that ends first may stand in for its own.
+    stand_in_allowed: bool,
+    /// Whether the next turn would recall, as the last turn ended.
+    next_turn_recalls: bool,
 }
 
 /// A recall that runs, or ran, in the background.
@@ -143,6 +171,7 @@ impl RecallJob {
         match self.kind {
             JobKind::Request => RecallDelivery::Earlier,
             JobKind::Speculative => RecallDelivery::Speculative,
+            JobKind::Draft => RecallDelivery::Draft,
         }
     }
 }
@@ -343,9 +372,9 @@ impl ContextGraphService {
         .await;
     }
 
-    /// Starts recalling `question` on `snapshot` in the background. A recall for the next turn
-    /// keeps one turn fewer out of its catalog, since the next turn's request makes the latest
-    /// turn an earlier one.
+    /// Starts recalling `question` on `snapshot` in the background. A recall ahead of the next
+    /// request keeps one turn fewer out of its catalog, since that request makes the latest turn
+    /// an earlier one.
     fn start_job(
         self: &Arc<Self>,
         snapshot: Arc<BranchSnapshot>,
@@ -357,7 +386,7 @@ impl ContextGraphService {
         let job_question = question.clone();
         let recent_turns = match kind {
             JobKind::Request => self.config.recent_turns,
-            JobKind::Speculative => self.config.recent_turns.saturating_sub(1),
+            JobKind::Speculative | JobKind::Draft => self.config.recent_turns.saturating_sub(1),
         };
         let task = tokio::spawn(async move {
             let history = snapshot.history(/*until_turn*/ None);
@@ -379,33 +408,46 @@ impl ContextGraphService {
         }
     }
 
-    fn take_job(&self) -> Option<RecallJob> {
-        self.job.lock().ok().and_then(|mut job| job.take())
+    fn jobs(&self) -> std::sync::MutexGuard<'_, RecallJobs> {
+        self.jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn put_job(&self, job: RecallJob) {
-        if let Ok(mut slot) = self.job.lock() {
-            *slot = Some(job);
+    /// A recall that ended after its turn went on, to add to the turn, once: the turn's own
+    /// recall, which supersedes the recalls made ahead of it, or, while the turn started without
+    /// a selection, one made ahead of it.
+    fn take_late_selection(&self) -> Option<(String, Arc<Selection>, RecallDelivery)> {
+        let mut jobs = self.jobs();
+        if let Some(job) = jobs.request.as_mut()
+            && !job.applied
+            && let Some(selection) = job.selection()
+        {
+            job.applied = true;
+            let question = job.question.clone();
+            jobs.stand_ins.clear();
+            jobs.stand_in_allowed = false;
+            return Some((question, selection, RecallDelivery::Deferred));
         }
-    }
-
-    /// The selection of the recall of a turn's request that finished after the turn went on
-    /// without it, with its question, once; later calls get `None`.
-    fn take_late_selection(&self) -> Option<(String, Arc<Selection>)> {
-        let mut slot = self.job.lock().ok()?;
-        let job = slot.as_mut()?;
-        if job.kind != JobKind::Request || job.applied {
+        if !jobs.stand_in_allowed {
             return None;
         }
-        let selection = job.selection()?;
+        let job = jobs
+            .stand_ins
+            .iter_mut()
+            .find(|job| !job.applied && job.selection().is_some())?;
         job.applied = true;
-        Some((job.question.clone(), selection))
+        let late = (job.question.clone(), job.selection()?, job.reused());
+        jobs.stand_in_allowed = false;
+        Some(late)
     }
 
-    /// What a turn starts from for `question`: the recall made before the request was known
-    /// when it serves the request, else the recall of the request if it ends within
-    /// `recall_wait_ms`, else the earlier recall while the recall of the request runs on.
-    /// `window` is what the window holds when recall may append to it.
+    /// What a turn starts from for `question`, in order: the recall of a draft that became the
+    /// request, once it ended; a recall made ahead of the request that ended and serves it; the
+    /// request's own recall if it ends within `recall_wait_ms`; else a recall made ahead of it
+    /// that ended, while the request's own runs on. Recalls made ahead that still run are kept,
+    /// to stand in when they end before the request's own. `window` is what the window holds
+    /// when recall may append to it.
     async fn turn_selection(
         self: &Arc<Self>,
         snapshot: &Arc<BranchSnapshot>,
@@ -413,21 +455,43 @@ impl ContextGraphService {
         question: &str,
         window: Option<&RecalledWindow>,
     ) -> TurnSelection {
-        let earlier = self.take_job();
-        let reused = earlier
-            .as_ref()
-            .and_then(|job| Some((job.selection()?, job.reused())));
-        if let (Some(mut job), Some((selection, delivery))) = (earlier, reused.clone())
-            && serves(
-                &selection,
-                history,
-                question,
-                self.view_limits(self.config.recall_budget_tokens, self.config.recent_turns),
-                window,
-            )
-        {
+        let limits = self.view_limits(self.config.recall_budget_tokens, self.config.recent_turns);
+        let mut ahead = {
+            let mut jobs = self.jobs();
+            jobs.stand_ins.clear();
+            jobs.stand_in_allowed = false;
+            let mut ahead = std::mem::take(&mut jobs.ahead);
+            // The last turn's own recall serves as an earlier one when nothing newer does.
+            ahead.extend(jobs.request.take());
+            ahead
+        };
+        let request = normalized(question);
+        let mut own = ahead
+            .iter()
+            .position(|job| job.kind == JobKind::Draft && normalized(&job.question) == request)
+            .map(|position| ahead.remove(position));
+
+        let ready = |job: &mut RecallJob| -> Option<(Arc<Selection>, RecallDelivery)> {
+            let selection = job.selection()?;
             job.applied = true;
-            self.put_job(job);
+            Some((selection, job.reused()))
+        };
+        let early = match own.as_mut() {
+            Some(draft) => ready(draft),
+            None => ahead.iter_mut().find_map(|job| {
+                let selection = job.selection()?;
+                serves(&selection, history, question, limits, window)
+                    .then(|| ready(job))
+                    .flatten()
+            }),
+        };
+        if let Some((selection, delivery)) = early {
+            let mut jobs = self.jobs();
+            jobs.request = own.map(|mut job| {
+                job.kind = JobKind::Request;
+                job
+            });
+            jobs.stand_ins = ahead;
             return TurnSelection::Ready {
                 selection,
                 delivery,
@@ -437,13 +501,16 @@ impl ContextGraphService {
         }
 
         let started = Instant::now();
-        let mut job = self.start_job(Arc::clone(snapshot), question.to_string(), JobKind::Request);
+        let mut job = own.unwrap_or_else(|| {
+            self.start_job(Arc::clone(snapshot), question.to_string(), JobKind::Request)
+        });
+        job.kind = JobKind::Request;
         let ended = job
             .wait(Duration::from_millis(self.config.recall_wait_ms))
             .await;
         let waited_ms = elapsed_ms(started);
-        let chosen = match (ended, reused) {
-            (Some(Some(selection)), _) => {
+        let chosen = match ended {
+            Some(Some(selection)) => {
                 job.applied = true;
                 TurnSelection::Ready {
                     selection,
@@ -452,18 +519,33 @@ impl ContextGraphService {
                     pending: false,
                 }
             }
-            (ended, Some((selection, delivery))) => TurnSelection::Ready {
-                selection,
-                delivery,
-                waited_ms,
-                pending: ended.is_none(),
-            },
-            (Some(None), None) => TurnSelection::Failed,
-            (None, None) => TurnSelection::Pending,
+            _ => {
+                // A recall made ahead that ended while the turn waited: one that serves the
+                // request, else the newest.
+                let serving = ahead.iter().position(|job| {
+                    job.selection().is_some_and(|selection| {
+                        serves(&selection, history, question, limits, window)
+                    })
+                });
+                let fallback =
+                    serving.or_else(|| ahead.iter().position(|job| job.selection().is_some()));
+                match fallback.and_then(|position| ready(&mut ahead[position])) {
+                    Some((selection, delivery)) => TurnSelection::Ready {
+                        selection,
+                        delivery,
+                        waited_ms,
+                        pending: ended.is_none(),
+                    },
+                    None if ended.is_some() && ahead.is_empty() => TurnSelection::Failed,
+                    None => TurnSelection::Pending,
+                }
+            }
         };
-        // A recall that ends later adds its blocks between model requests, and serves the next
-        // turn when nothing newer replaces it.
-        self.put_job(job);
+        let mut jobs = self.jobs();
+        jobs.stand_in_allowed = matches!(chosen, TurnSelection::Pending);
+        jobs.stand_ins = ahead;
+        // The request's own recall that ends later adds its blocks between model requests.
+        jobs.request = Some(job);
         chosen
     }
 
@@ -475,19 +557,25 @@ impl ContextGraphService {
         question: &str,
     ) -> Option<(Arc<Selection>, u64)> {
         let started = Instant::now();
-        match self.take_job() {
-            Some(mut job) if job.question == question => {
-                let ended = job
-                    .wait(Duration::from_secs(self.config.recall_timeout_secs))
-                    .await;
-                job.applied = true;
-                self.put_job(job);
-                if let Some(Some(selection)) = ended {
-                    return Some((selection, elapsed_ms(started)));
+        let running = {
+            let mut jobs = self.jobs();
+            match jobs.request.take() {
+                Some(job) if normalized(&job.question) == normalized(question) => Some(job),
+                other => {
+                    jobs.request = other;
+                    None
                 }
             }
-            Some(job) => self.put_job(job),
-            None => {}
+        };
+        if let Some(mut job) = running {
+            let ended = job
+                .wait(Duration::from_secs(self.config.recall_timeout_secs))
+                .await;
+            job.applied = true;
+            self.jobs().request = Some(job);
+            if let Some(Some(selection)) = ended {
+                return Some((selection, elapsed_ms(started)));
+            }
         }
         match self
             .select(history, question, self.config.recent_turns)
@@ -955,7 +1043,7 @@ pub(crate) async fn add_finished_recall(sess: &Arc<Session>, step_context: &Arc<
     let Some(window) = service.window() else {
         return;
     };
-    let Some((question, selection)) = service.take_late_selection() else {
+    let Some((question, selection, delivery)) = service.take_late_selection() else {
         return;
     };
     let snapshot = match service.snapshot().await {
@@ -967,7 +1055,7 @@ pub(crate) async fn add_finished_recall(sess: &Arc<Session>, step_context: &Arc<
     };
     let history = snapshot.history(/*until_turn*/ None);
     let mut recall = service.plan(&history, &selection);
-    recall.stats.delivery = Some(RecallDelivery::Deferred);
+    recall.stats.delivery = Some(delivery);
     let (_, missing) = coverage(&history, &recall.view, &window);
     service
         .announce_view(
@@ -1001,12 +1089,20 @@ pub(crate) async fn speculate_recall(
     let Some(service) = sess.services.context_graph.clone() else {
         return;
     };
-    if !service.config.speculative_recall
-        || !service
-            .wants_recall(sess, step_context, RecallTrigger::TurnStart)
-            .await
+    let next_turn_recalls = service
+        .wants_recall(sess, step_context, RecallTrigger::TurnStart)
+        .await;
     {
-        return;
+        let mut jobs = service.jobs();
+        jobs.next_turn_recalls = next_turn_recalls;
+        jobs.stand_ins.clear();
+        jobs.stand_in_allowed = false;
+        // Without a recall made ahead, the ended turn's own serves the next as an earlier one.
+        if !service.config.speculative_recall || !next_turn_recalls {
+            return;
+        }
+        jobs.request = None;
+        jobs.ahead.retain(|job| job.kind == JobKind::Draft);
     }
     let snapshot = match service.snapshot().await {
         Ok(snapshot) => Arc::new(snapshot),
@@ -1027,7 +1123,48 @@ pub(crate) async fn speculate_recall(
         answer,
     );
     let job = service.start_job(snapshot, question, JobKind::Speculative);
-    service.put_job(job);
+    service.jobs().ahead.push(job);
+}
+
+/// Starts recalling, in the background, for `draft`, the request the user is writing, so that
+/// its recall is ready, or nearly, when it is sent. Runs only when the next turn would recall
+/// and the draft is long enough, and replaces the recall of an earlier draft. Returns whether
+/// it started one.
+pub(crate) async fn prefetch_recall(sess: &Arc<Session>, draft: &str) -> bool {
+    let Some(service) = sess.services.context_graph.clone() else {
+        return false;
+    };
+    let draft = normalized(draft);
+    if draft.chars().count() < MIN_DRAFT_CHARS || service.mode() == ContextMode::Full {
+        return false;
+    }
+    {
+        let jobs = service.jobs();
+        let recalls = jobs.next_turn_recalls || service.mode() == ContextMode::Recall;
+        let known = jobs
+            .ahead
+            .iter()
+            .any(|job| job.kind == JobKind::Draft && normalized(&job.question) == draft);
+        if !recalls || known {
+            return false;
+        }
+    }
+    let snapshot = match service.snapshot().await {
+        Ok(snapshot) => Arc::new(snapshot),
+        Err(err) => {
+            warn!("context recall could not read the history: {err:#}");
+            return false;
+        }
+    };
+    // Sending the draft makes the latest turn an earlier one.
+    if !service.has_earlier_history(&snapshot, service.config.recent_turns.saturating_sub(1)) {
+        return false;
+    }
+    let job = service.start_job(snapshot, draft, JobKind::Draft);
+    let mut jobs = service.jobs();
+    jobs.ahead.retain(|job| job.kind != JobKind::Draft);
+    jobs.ahead.insert(0, job);
+    true
 }
 
 /// Appends the picked blocks the window lacks as one note, so the window keeps its prefix.

@@ -55,6 +55,7 @@ pub(crate) use merge::PreparedMerge;
 pub(crate) use model::SessionShadowModel;
 pub(crate) use recall::RecallTrigger;
 pub(crate) use recall::add_finished_recall;
+pub(crate) use recall::prefetch_recall;
 pub(crate) use recall::recall_into_history;
 pub(crate) use recall::speculate_recall;
 
@@ -230,7 +231,7 @@ pub(crate) async fn start(
         recalled_references: StdMutex::new(None),
         window: StdMutex::new(None),
         rebuild_requested: AtomicBool::new(false),
-        job: StdMutex::new(None),
+        jobs: StdMutex::new(recall::RecallJobs::default()),
     }));
     start
 }
@@ -293,9 +294,9 @@ pub(crate) struct ContextGraphService {
     window: StdMutex<Option<RecalledWindow>>,
     /// Whether the user asked to rebuild the history by recall before the next turn.
     rebuild_requested: AtomicBool,
-    /// The latest recall run in the background: of a turn's request, when the turn went on
-    /// without it, or of the turn that just ended, for the next one.
-    job: StdMutex<Option<recall::RecallJob>>,
+    /// The recalls run in the background: ahead of the next request, and of the running
+    /// turn's request when the turn went on without it.
+    jobs: StdMutex<recall::RecallJobs>,
 }
 
 /// The blocks a recalled context window holds.

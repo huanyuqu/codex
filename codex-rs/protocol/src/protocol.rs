@@ -2290,8 +2290,9 @@ pub struct ContextViewRecalledEvent {
     pub latency_ms: u64,
     /// How the view reached the context window: `waited` when the turn waited for it,
     /// `speculative` when it was made as the previous turn ended, `earlier` when it was made for
-    /// the previous request, `deferred` when it joined the turn between model requests, or
-    /// `lexical` when lexical search alone chose while the recall ran.
+    /// the previous request, `deferred` when it joined the turn between model requests,
+    /// `lexical` when lexical search alone chose while the recall ran, or `draft` when it was
+    /// made for a draft of the request while the user wrote it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub delivery: Option<String>,

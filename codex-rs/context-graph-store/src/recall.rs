@@ -194,6 +194,8 @@ pub enum RecallDelivery {
     Deferred,
     /// Lexical search alone chose, while the recall of the request ran.
     Lexical,
+    /// The recall was made for a draft of the request, while the user wrote it.
+    Draft,
 }
 
 impl RecallDelivery {
@@ -205,6 +207,7 @@ impl RecallDelivery {
             Self::Earlier => "earlier",
             Self::Deferred => "deferred",
             Self::Lexical => "lexical",
+            Self::Draft => "draft",
         }
     }
 }

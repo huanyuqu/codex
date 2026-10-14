@@ -424,3 +424,192 @@ async fn the_next_turn_starts_from_the_recall_made_when_a_turn_ends() -> Result<
     assert!(next[0].contains(RECALL_NOTICE), "missing recall notice");
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recall_made_ahead_stands_in_when_the_requests_own_fails() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    skip_if_target_windows!(Ok(()), "uses a POSIX shell command");
+    let server = start_mock_server().await;
+    mount_sse_once_match(
+        &server,
+        body(
+            &[FIRST_REQUEST],
+            &[SCREENING, SECOND_REQUEST, THIRD_REQUEST],
+        ),
+        answer("m1", "Retries added."),
+    )
+    .await;
+    // Recall made as the first turn ends picks nothing; it serves the second request, which
+    // rebuilds the history from it.
+    mount_sse_once_match(
+        &server,
+        body(
+            &[SCREENING, "Retries added."],
+            &[SECOND_REQUEST, THIRD_REQUEST, "Timeout added."],
+        ),
+        screening_answer("s1", &[]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        body(&[SECOND_REQUEST], &[SCREENING, THIRD_REQUEST]),
+        answer("m2", "Timeout added."),
+    )
+    .await;
+    // Recall made as the second turn ends is still running when the third request comes.
+    mount_response_once_match(
+        &server,
+        body(&[SCREENING, "Timeout added."], &[THIRD_REQUEST]),
+        sse_response(screening_answer(
+            "s2",
+            &["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"],
+        ))
+        .set_delay(Duration::from_millis(1_500)),
+    )
+    .await;
+    // The third request's own recall fails.
+    mount_response_once_match(
+        &server,
+        body(&[SCREENING, THIRD_REQUEST], &[]),
+        wiremock::ResponseTemplate::new(400)
+            .set_body_json(json!({ "error": { "message": "bad request" } })),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        body(&[THIRD_REQUEST], &[SCREENING, "wait-1"]),
+        sse(vec![
+            ev_function_call(
+                "wait-1",
+                "exec_command",
+                &json!({ "cmd": "sleep 2", "yield_time_ms": 10_000 }).to_string(),
+            ),
+            ev_completed("m3"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        body(&[THIRD_REQUEST, "wait-1"], &[SCREENING]),
+        answer("m4", "They make the client survive flaky networks."),
+    )
+    .await;
+
+    let mut builder = test_codex().with_model("gpt-5.2").with_config(|config| {
+        recalling(config);
+        config.context_graph.recall_wait_ms = 300;
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    turn(&test.codex, FIRST_REQUEST).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !request_bodies(&server)
+        .await
+        .iter()
+        .any(|body| body.contains(SCREENING))
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    turn(&test.codex, SECOND_REQUEST).await?;
+    // Sent at once, while the recall made as the second turn ended still runs.
+    turn(&test.codex, THIRD_REQUEST).await?;
+
+    let bodies = request_bodies(&server).await;
+    let third: Vec<&String> = bodies
+        .iter()
+        .filter(|body| body.contains(THIRD_REQUEST) && !body.contains(SCREENING))
+        .collect();
+    assert_eq!(third.len(), 2);
+    // The recall made ahead ended during the turn and stood in for the failed one.
+    let notes = |body: &str| body.matches(RECALLED_NOTE).count();
+    assert_eq!(
+        notes(third[1]),
+        notes(third[0]) + 1,
+        "the recall made ahead did not stand in"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_recall_of_a_draft_becomes_the_recall_of_the_request() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    mount_sse_once_match(
+        &server,
+        body(&[FIRST_REQUEST], &[SCREENING, SECOND_REQUEST]),
+        answer("m1", "Retries added."),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        body(&[SCREENING, SECOND_REQUEST], &[]),
+        screening_answer("s-draft", &["C1"]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        body(&[SECOND_REQUEST], &[SCREENING]),
+        answer("m2", "Timeout added."),
+    )
+    .await;
+
+    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    provider.base_url = Some(format!("{}/v1", server.uri()));
+    provider.supports_websockets = false;
+    let mut builder = test_codex().with_config(move |config| {
+        config.model = Some("gpt-5.2".to_string());
+        config.model_provider = provider;
+        recalling(config);
+        config.context_graph.speculative_recall = false;
+    });
+    let test = builder.build(&server).await?;
+    turn(&test.codex, FIRST_REQUEST).await?;
+
+    // Too short to be worth recalling for.
+    assert!(!test.codex.prefetch_context_recall("Now add").await);
+    // The user pauses while writing the request.
+    assert!(test.codex.prefetch_context_recall(SECOND_REQUEST).await);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !request_bodies(&server)
+        .await
+        .iter()
+        .any(|body| body.contains(SCREENING))
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: SECOND_REQUEST.into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let recalled = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ContextViewRecalled(_))
+    })
+    .await;
+    let EventMsg::ContextViewRecalled(recalled) = recalled else {
+        unreachable!("waited for a recalled view");
+    };
+    assert_eq!(recalled.delivery.as_deref(), Some("draft"));
+    assert_eq!(recalled.waited_ms, Some(0));
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    // The request was screened once, as a draft.
+    let bodies = request_bodies(&server).await;
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| body.contains(SCREENING))
+            .count(),
+        1
+    );
+    Ok(())
+}
