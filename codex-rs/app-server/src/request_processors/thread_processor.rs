@@ -2493,6 +2493,15 @@ impl ThreadRequestProcessor {
         Ok(ThreadBackgroundTerminalsCleanResponse {})
     }
 
+    pub(crate) async fn thread_background_terminals_detach(
+        &self,
+        params: ThreadBackgroundTerminalsDetachParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let (_, thread) = self.load_thread(&params.thread_id).await?;
+        thread.detach_waiting_commands();
+        Ok(Some(ThreadBackgroundTerminalsDetachResponse {}.into()))
+    }
+
     async fn thread_background_terminals_list_inner(
         &self,
         params: ThreadBackgroundTerminalsListParams,

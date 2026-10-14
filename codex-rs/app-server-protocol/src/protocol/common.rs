@@ -812,6 +812,12 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadBackgroundTerminalsCleanResponse,
     },
+    #[experimental("thread/backgroundTerminals/detach")]
+    ThreadBackgroundTerminalsDetach => "thread/backgroundTerminals/detach" {
+        params: v2::ThreadBackgroundTerminalsDetachParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadBackgroundTerminalsDetachResponse,
+    },
     #[experimental("thread/backgroundTerminals/list")]
     ThreadBackgroundTerminalsList => "thread/backgroundTerminals/list" {
         params: v2::ThreadBackgroundTerminalsListParams,
