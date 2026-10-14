@@ -3,6 +3,7 @@ use pretty_assertions::assert_eq;
 use super::*;
 use crate::BlockKind;
 use crate::test_support::card;
+use crate::test_support::retry_session;
 
 #[test]
 fn terms_split_identifiers_paths_and_chinese() {
@@ -51,4 +52,37 @@ fn bm25_prefers_rare_terms() {
     let scores = index.scores("backoff");
     assert!(scores[2] > 0.0);
     assert_eq!((scores[0], scores[1]), (0.0, 0.0));
+}
+
+#[test]
+fn lexical_matches_rank_earlier_blocks_and_skip_the_recent_turns() {
+    let session = retry_session();
+    let history = session.history();
+    let ids = |indices: Vec<usize>| -> Vec<String> {
+        let mut ids: Vec<String> = indices
+            .into_iter()
+            .map(|index| history.card(index).block_id.to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    let recent_start = history.recent_start(1);
+    assert_eq!(
+        ids(lexical_matches(&history, "fixed delay", recent_start, 5)),
+        vec!["a2", "u2"]
+    );
+    assert_eq!(
+        lexical_matches(&history, "fixed delay", recent_start, 1).len(),
+        1
+    );
+    // With turn 2 among the recent turns, nothing before them matches.
+    assert_eq!(
+        lexical_matches(&history, "fixed delay", history.recent_start(3), 5),
+        Vec::<usize>::new()
+    );
+    assert_eq!(
+        lexical_matches(&history, "", recent_start, 5),
+        Vec::<usize>::new()
+    );
 }

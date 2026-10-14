@@ -501,3 +501,120 @@ async fn a_cascade_screens_only_the_best_scored_cards() {
     assert_eq!(recall.stats.candidates, 1);
     assert!(shown(&recall).contains(&("a1", Presentation::Full, Reason::Selected)));
 }
+
+/// The session, with the long log's card naming the parser log.
+fn session_with_log_title() -> Session {
+    let mut session = Session::new();
+    session.cards[1].title = "parser log of the failing run".to_string();
+    session
+}
+
+#[tokio::test]
+async fn lexical_matches_back_up_the_screening() {
+    let session = session_with_log_title();
+    let history = session.history();
+    let model = ScriptedModel::new(
+        Some(
+            r#"{"selected": [{"card": "C3", "detail": "full", "reason": "the fix"}], "uncertain": []}"#,
+        ),
+        None,
+    );
+    let recall = Recaller::new(model.clone(), None, config())
+        .recall(&history, "What did the parser log say?")
+        .await
+        .unwrap_or_else(|err| panic!("recall: {err}"));
+    assert_eq!(
+        shown(&recall),
+        vec![
+            ("u1", Presentation::Full, Reason::TaskStart),
+            ("l1", Presentation::Summary, Reason::Lexical),
+            ("a1", Presentation::Full, Reason::Selected),
+            ("u2", Presentation::Full, Reason::Recent),
+        ]
+    );
+    assert_eq!(recall.stats.lexical, 1);
+
+    let without = Recaller::new(
+        model,
+        None,
+        RecallConfig {
+            max_matches: 0,
+            ..config()
+        },
+    )
+    .recall(&history, "What did the parser log say?")
+    .await
+    .unwrap_or_else(|err| panic!("recall: {err}"));
+    assert!(!without.view.shows(1));
+    assert_eq!(without.stats.lexical, 0);
+}
+
+#[tokio::test]
+async fn blocks_a_reader_left_out_are_not_matched_back_in() {
+    let session = session_with_log_title();
+    let history = session.history();
+    // R1 is the uncertain a1, R2 the large picked l1, which the reader drops.
+    let model = ScriptedModel::new(
+        Some(SCREEN),
+        Some(
+            r#"{"blocks": [
+                {"block": "R1", "decision": "full", "lines": [], "reason": "the fix"},
+                {"block": "R2", "decision": "drop", "lines": [], "reason": "noise"}
+            ]}"#,
+        ),
+    );
+    let selection = Recaller::new(model.clone(), Some(model), config())
+        .select(&history, "What did the parser log say?")
+        .await
+        .unwrap_or_else(|err| panic!("select: {err}"));
+    assert_eq!(selection.question, "What did the parser log say?");
+    assert_eq!(
+        selection
+            .picks
+            .iter()
+            .map(|pick| pick.block_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a1"]
+    );
+    assert!(!selection.shows(&BlockId::from_stored("l1")));
+}
+
+#[test]
+fn a_selection_plans_a_view_of_the_history_as_it_grew() {
+    let selection = Selection {
+        question: "q".to_string(),
+        picks: vec![
+            SelectedBlock {
+                block_id: BlockId::from_stored("a1"),
+                presentation: Presentation::Full,
+                note: None,
+            },
+            SelectedBlock {
+                block_id: BlockId::from_stored("gone"),
+                presentation: Presentation::Full,
+                note: None,
+            },
+        ],
+        matches: vec![BlockId::from_stored("l1")],
+        stats: RecallStats::default(),
+    };
+    // A turn was recorded after the selection was made.
+    let mut session = Session::new();
+    session.cards.push(card("u3", BlockKind::UserMessage, "t3"));
+    session
+        .items
+        .push(vec![message("user", "And block comments?")]);
+    let history = session.history();
+
+    let recall = selection.plan(&history, config().view);
+    assert_eq!(
+        shown(&recall),
+        vec![
+            ("u1", Presentation::Full, Reason::TaskStart),
+            ("l1", Presentation::Summary, Reason::Lexical),
+            ("a1", Presentation::Full, Reason::Selected),
+            ("u3", Presentation::Full, Reason::Recent),
+        ]
+    );
+    assert_eq!(recall.stats.lexical, 1);
+}

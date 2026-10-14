@@ -5,8 +5,13 @@
 //! too long for one catalog is first narrowed to the episodes the request needs. When the
 //! screening is unsure, a stronger model screens again. A reading model then reads the undecided
 //! blocks, and large picked blocks, in full, and decides for each whether to show it whole, an
-//! excerpt or a summary, or to leave it out. The picks become a [`ContextView`] that fits the
-//! token budget.
+//! excerpt or a summary, or to leave it out. Blocks that lexical search ranks high for the
+//! request but no one picked are added as summaries, so a block the screening missed is not lost.
+//! The picks become a [`ContextView`] that fits the token budget.
+//!
+//! Choosing ([`Recaller::select`]) is apart from planning the view ([`Selection::plan`]), and a
+//! selection names blocks by ID: one made in the background, on a history that has grown since,
+//! still plans a view of the history as it is now.
 //!
 //! Instead of one listwise screening, a [`RelevanceScorer`] can judge every card on its own
 //! (pointwise), or narrow the candidates down for the listwise screening (cascade).
@@ -15,6 +20,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
+use codex_context_graph::BlockId;
 use codex_context_graph::history::History;
 use codex_context_graph::read::ReadLimits;
 use codex_context_graph::read::build_read_prompts;
@@ -30,11 +36,13 @@ use codex_context_graph::screen::build_episode_prompt;
 use codex_context_graph::screen::build_screen_prompt_within;
 use codex_context_graph::screen::parse_episode_answer;
 use codex_context_graph::screen::parse_screen_answer;
+use codex_context_graph::search::lexical_matches;
 use codex_context_graph::view::ContextView;
 use codex_context_graph::view::Pick;
 use codex_context_graph::view::Presentation;
+use codex_context_graph::view::Reason;
 use codex_context_graph::view::ViewLimits;
-use codex_context_graph::view::plan_view;
+use codex_context_graph::view::plan_view_with_matches;
 use futures::future::join_all;
 use serde::Deserialize;
 use serde::Serialize;
@@ -68,6 +76,8 @@ pub struct RecallConfig {
     pub strategy: ScreenStrategy,
     /// Cards a cascade keeps for the listwise screening.
     pub cascade_candidates: usize,
+    /// Lexical matches a view may summarize besides the picks; 0 adds none.
+    pub max_matches: usize,
 }
 
 impl Default for RecallConfig {
@@ -79,6 +89,7 @@ impl Default for RecallConfig {
             read_over_tokens: 3_000,
             strategy: ScreenStrategy::Listwise,
             cascade_candidates: 60,
+            max_matches: 8,
         }
     }
 }
@@ -140,6 +151,31 @@ pub struct RecallStats {
     /// Cards the scorer judged.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub scored: usize,
+    /// Lexical matches the view summarizes besides the picks.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lexical: usize,
+    /// How the view reached the context window, once it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<RecallDelivery>,
+    /// How long the turn waited for the recall, in milliseconds.
+    #[serde(default, skip_serializing_if = "is_zero_ms")]
+    pub waited_ms: u64,
+}
+
+/// How a recalled view reached the context window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallDelivery {
+    /// The turn waited for the recall of its request.
+    Waited,
+    /// The recall ran when the previous turn ended, before the request was known.
+    Speculative,
+    /// The recall was made for the previous turn's request.
+    Earlier,
+    /// The recall finished after its turn went on, and was added between model requests.
+    Deferred,
+    /// Lexical search alone chose, while the recall of the request ran.
+    Lexical,
 }
 
 #[expect(
@@ -150,11 +186,77 @@ fn is_zero(value: &usize) -> bool {
     *value == 0
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes the field by reference"
+)]
+fn is_zero_ms(value: &u64) -> bool {
+    *value == 0
+}
+
 /// The view a recall built, with its stats.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recall {
     pub view: ContextView,
     pub stats: RecallStats,
+}
+
+/// A block a recall picked, with how much of it to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedBlock {
+    pub block_id: BlockId,
+    pub presentation: Presentation,
+    /// Why it was picked, for the view record.
+    pub note: Option<String>,
+}
+
+/// What a recall chose for a request, before it becomes a view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selection {
+    pub question: String,
+    /// Picked blocks, most important first.
+    pub picks: Vec<SelectedBlock>,
+    /// Blocks that lexical search ranks high for the request and that no pick shows, best
+    /// first.
+    pub matches: Vec<BlockId>,
+    pub stats: RecallStats,
+}
+
+impl Selection {
+    /// The view of `history` that shows this selection. Blocks the history does not have are
+    /// skipped, and blocks recorded since the selection was made are shown like any others, so
+    /// a selection made on an earlier history still plans a view of the current one.
+    pub fn plan(&self, history: &History<'_>, limits: ViewLimits) -> Recall {
+        let picks: Vec<Pick> = self
+            .picks
+            .iter()
+            .filter_map(|pick| {
+                Some(Pick {
+                    index: history.position(&pick.block_id)?,
+                    presentation: pick.presentation.clone(),
+                    note: pick.note.clone(),
+                })
+            })
+            .collect();
+        let matches: Vec<usize> = self
+            .matches
+            .iter()
+            .filter_map(|block| history.position(block))
+            .collect();
+        let view = plan_view_with_matches(history, &picks, &matches, limits);
+        let mut stats = self.stats.clone();
+        stats.lexical = view
+            .entries
+            .iter()
+            .filter(|entry| entry.reason == Reason::Lexical)
+            .count();
+        Recall { view, stats }
+    }
+
+    /// Whether the selection shows the block `block`, picked or as a lexical match.
+    pub fn shows(&self, block: &BlockId) -> bool {
+        self.picks.iter().any(|pick| &pick.block_id == block) || self.matches.contains(block)
+    }
 }
 
 /// Screens and reads with the shadow agent's models.
@@ -203,6 +305,13 @@ impl Recaller {
     /// Builds the view of `history` for `question`. Fails when screening fails; a failed
     /// reading leaves the screening picks as they were.
     pub async fn recall(&self, history: &History<'_>, question: &str) -> anyhow::Result<Recall> {
+        let selection = self.select(history, question).await?;
+        Ok(selection.plan(history, self.config.view))
+    }
+
+    /// Chooses the blocks of `history` that `question` needs. Fails when screening fails; a
+    /// failed reading leaves the screening picks as they were.
+    pub async fn select(&self, history: &History<'_>, question: &str) -> anyhow::Result<Selection> {
         let started = Instant::now();
         let recent_start = history.recent_start(self.config.view.recent_turns);
         let mut stats = RecallStats::default();
@@ -254,13 +363,14 @@ impl Recaller {
             .map(|pick| pick.index)
             .collect();
         let to_read: Vec<usize> = answer.uncertain.iter().chain(&large).copied().collect();
+        let mut left_out = HashSet::new();
         match &self.read_model {
             Some(read_model) if !to_read.is_empty() => {
                 stats.read = to_read.len();
                 let decided = self
                     .read(read_model.as_ref(), history, question, &to_read, &mut stats)
                     .await;
-                apply_reading(&mut picks, &answer.uncertain, decided);
+                left_out = apply_reading(&mut picks, &answer.uncertain, decided);
             }
             // Without a reader, blocks screening could not decide are summarized.
             _ => picks.extend(answer.uncertain.iter().map(|index| Pick {
@@ -270,9 +380,38 @@ impl Recaller {
             })),
         }
 
-        let view = plan_view(history, &picks, self.config.view);
+        // Blocks a reader left out after reading them are not brought back as matches.
+        let matches = if self.config.max_matches == 0 {
+            Vec::new()
+        } else {
+            lexical_matches(
+                history,
+                question,
+                recent_start,
+                self.config.max_matches + picks.len() + left_out.len(),
+            )
+            .into_iter()
+            .filter(|index| {
+                !left_out.contains(index) && !picks.iter().any(|pick| pick.index == *index)
+            })
+            .take(self.config.max_matches)
+            .map(|index| history.card(index).block_id.clone())
+            .collect()
+        };
         stats.latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        Ok(Recall { view, stats })
+        Ok(Selection {
+            question: question.to_string(),
+            picks: picks
+                .into_iter()
+                .map(|pick| SelectedBlock {
+                    block_id: history.card(pick.index).block_id.clone(),
+                    presentation: pick.presentation,
+                    note: pick.note,
+                })
+                .collect(),
+            matches,
+            stats,
+        })
     }
 
     /// Scores `candidates` with `scorer`, recording what it judged.
@@ -441,12 +580,18 @@ impl Recaller {
 
 /// Applies reading decisions: picked blocks take the decided presentation or are left out, and
 /// uncertain blocks that reading kept are added after the picks. Undecided picks stay as
-/// screened, and undecided uncertain blocks are left out.
+/// screened, and undecided uncertain blocks are left out. Returns the blocks reading decided to
+/// leave out.
 fn apply_reading(
     picks: &mut Vec<Pick>,
     uncertain: &[usize],
     decided: Vec<(usize, Option<Presentation>, Option<String>)>,
-) {
+) -> HashSet<usize> {
+    let left_out = decided
+        .iter()
+        .filter(|(_, presentation, _)| presentation.is_none())
+        .map(|(index, _, _)| *index)
+        .collect();
     for (index, presentation, note) in decided {
         match (
             picks.iter().position(|pick| pick.index == index),
@@ -464,6 +609,7 @@ fn apply_reading(
             (None, _) => {}
         }
     }
+    left_out
 }
 
 #[cfg(test)]

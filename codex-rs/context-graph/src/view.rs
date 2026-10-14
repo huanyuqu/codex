@@ -2,9 +2,10 @@
 //!
 //! A selector, such as a screening model, BM25 or an oracle, picks blocks. [`plan_view`] turns
 //! the picks into a view: it always keeps the most recent turns and the task the branch started
-//! with, adds what picked blocks depend on and what made them outdated, lists every user
-//! constraint and decision in a ledger, and shrinks the least important picks until the view fits
-//! its token budget. [`render_view`] turns the view into the items the model sees.
+//! with, adds what picked blocks depend on and what made them outdated, adds summaries of blocks
+//! that match the request's words but were not picked, lists every user constraint and decision
+//! in a ledger, and shrinks the least important picks until the view fits its token budget.
+//! [`render_view`] turns the view into the items the model sees.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -64,7 +65,8 @@ impl Presentation {
         }
     }
 
-    fn detail(&self) -> u8 {
+    /// How much of a block the presentation shows: 1 for a summary, 2 for an excerpt, 3 in full.
+    pub fn detail(&self) -> u8 {
         match self {
             Self::Full => 3,
             Self::Excerpt { .. } => 2,
@@ -87,6 +89,9 @@ pub enum Reason {
     Dependency,
     /// It made a shown block outdated.
     Successor,
+    /// Its card matches the request's words, files or symbols, though the selector did not pick
+    /// it.
+    Lexical,
 }
 
 impl Reason {
@@ -98,6 +103,7 @@ impl Reason {
             Self::Selected => "selected",
             Self::Dependency => "dependency",
             Self::Successor => "successor",
+            Self::Lexical => "lexical",
         }
     }
 }
@@ -178,6 +184,8 @@ pub struct ViewLimits {
     pub task_start_max_tokens: u32,
     pub max_ledger_tokens: u32,
     pub max_map_turns: usize,
+    /// Tokens the summaries of lexical matches may take.
+    pub lexical_budget_tokens: u32,
 }
 
 impl Default for ViewLimits {
@@ -188,12 +196,26 @@ impl Default for ViewLimits {
             task_start_max_tokens: 4_000,
             max_ledger_tokens: 4_000,
             max_map_turns: 60,
+            lexical_budget_tokens: 6_000,
         }
     }
 }
 
 /// Builds the view of `history` that shows `picks`, most important first.
 pub fn plan_view(history: &History<'_>, picks: &[Pick], limits: ViewLimits) -> ContextView {
+    plan_view_with_matches(history, picks, /*matches*/ &[], limits)
+}
+
+/// Like [`plan_view`], and also summarizes `matches`, blocks that lexical search ranks high for
+/// the request, best first, that the picks do not show. They are a safety net for blocks the
+/// selector missed: they take at most `lexical_budget_tokens` and are the first to go when the
+/// view is over budget.
+pub fn plan_view_with_matches(
+    history: &History<'_>,
+    picks: &[Pick],
+    matches: &[usize],
+    limits: ViewLimits,
+) -> ContextView {
     let recent_start = history.recent_start(limits.recent_turns);
     let mut entries: BTreeMap<usize, ViewEntry> = BTreeMap::new();
     // Picks and the blocks they pull in, most important first, for shrinking to the budget.
@@ -280,6 +302,25 @@ pub fn plan_view(history: &History<'_>, picks: &[Pick], limits: ViewLimits) -> C
             );
             priority.push(successor);
         }
+    }
+
+    let mut lexical_tokens = 0;
+    for index in matches {
+        if history.is_recent(*index, recent_start)
+            || !history.recallable(*index)
+            || entries.contains_key(index)
+            || superseded_by.contains_key(index)
+        {
+            continue;
+        }
+        let mut matched = entry(*index, Presentation::Summary, Reason::Lexical);
+        matched.tokens = entry_tokens(history, &matched);
+        if lexical_tokens + matched.tokens > limits.lexical_budget_tokens {
+            break;
+        }
+        lexical_tokens += matched.tokens;
+        entries.insert(*index, matched);
+        priority.push(*index);
     }
 
     // A block whose files changed since it read them is summarized, like an outdated one.
@@ -401,9 +442,21 @@ fn view_tokens(view: &ContextView) -> u32 {
     entries + ledger + map + estimate_tokens(RECALL_NOTICE)
 }
 
-/// Summarizes, then leaves out, the least important of `priority` until the view fits.
+/// How [`fit_budget`] makes room.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fit {
+    /// Leave out lexical matches, which no selector picked.
+    DropMatches,
+    /// Show a block's summary instead of more of it.
+    Shrink,
+    /// Leave a block out.
+    Drop,
+}
+
+/// Leaves out the lexical matches, then summarizes, then leaves out the least important of
+/// `priority` until the view fits.
 fn fit_budget(history: &History<'_>, view: &mut ContextView, priority: &[usize]) {
-    for shrink in [true, false] {
+    for fit in [Fit::DropMatches, Fit::Shrink, Fit::Drop] {
         for index in priority.iter().rev() {
             if view.tokens <= view.budget_tokens {
                 return;
@@ -412,19 +465,23 @@ fn fit_budget(history: &History<'_>, view: &mut ContextView, priority: &[usize])
                 continue;
             };
             let entry = &mut view.entries[position];
-            if shrink {
-                if entry.presentation == Presentation::Summary {
-                    continue;
+            match fit {
+                Fit::DropMatches if entry.reason != Reason::Lexical => {}
+                Fit::Shrink => {
+                    if entry.presentation == Presentation::Summary {
+                        continue;
+                    }
+                    entry.presentation = Presentation::Summary;
+                    let tokens = entry_tokens(history, entry);
+                    view.tokens = view.tokens - entry.tokens + tokens;
+                    entry.tokens = tokens;
+                    view.shrunk += 1;
                 }
-                entry.presentation = Presentation::Summary;
-                let tokens = entry_tokens(history, entry);
-                view.tokens = view.tokens - entry.tokens + tokens;
-                entry.tokens = tokens;
-                view.shrunk += 1;
-            } else {
-                view.tokens -= entry.tokens;
-                view.entries.remove(position);
-                view.dropped += 1;
+                Fit::DropMatches | Fit::Drop => {
+                    view.tokens -= entry.tokens;
+                    view.entries.remove(position);
+                    view.dropped += 1;
+                }
             }
         }
     }

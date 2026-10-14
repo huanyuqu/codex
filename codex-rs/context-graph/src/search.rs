@@ -1,10 +1,12 @@
 //! Lexical search over cards: BM25 plus a bonus for files and symbols the query names. Recall
 //! uses it to cut the candidates of very long histories down to what a screening prompt can
-//! hold, and evaluation uses it as the simplest selector.
+//! hold and to add the blocks a screening missed, and evaluation uses it as the simplest
+//! selector.
 
 use std::collections::HashMap;
 
 use crate::card::BlockCard;
+use crate::history::History;
 
 const K1: f32 = 1.2;
 const B: f32 = 0.75;
@@ -14,6 +16,8 @@ const FILE_BONUS: f32 = 4.0;
 const SYMBOL_BONUS: f32 = 2.0;
 /// Shortest file name or symbol that earns a bonus, so that `a` or `io` do not match everything.
 const MIN_ENTITY_CHARS: usize = 4;
+/// Matches scoring below this share of the best match are too weak to show.
+const MIN_MATCH_SHARE: f32 = 0.3;
 
 /// Splits `text` into search terms: lowercase words of ASCII letters and digits, the parts of
 /// snake_case and camelCase identifiers, and overlapping pairs of characters in other scripts,
@@ -194,6 +198,33 @@ pub fn rank_cards(cards: &[&BlockCard], query: &str) -> Vec<(usize, f32)> {
         .collect();
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     ranked
+}
+
+/// The blocks before the recent turns whose cards best match `question`, best first: at most
+/// `max`, and none much weaker than the best match.
+pub fn lexical_matches(
+    history: &History<'_>,
+    question: &str,
+    recent_start: usize,
+    max: usize,
+) -> Vec<usize> {
+    let candidates: Vec<usize> = (0..history.len())
+        .filter(|index| history.recallable(*index) && !history.is_recent(*index, recent_start))
+        .collect();
+    let cards: Vec<&BlockCard> = candidates
+        .iter()
+        .map(|index| history.card(*index))
+        .collect();
+    let ranked = rank_cards(&cards, question);
+    let Some(best) = ranked.first().map(|(_, score)| *score) else {
+        return Vec::new();
+    };
+    ranked
+        .into_iter()
+        .take_while(|(_, score)| *score >= best * MIN_MATCH_SHARE)
+        .take(max)
+        .map(|(position, _)| candidates[position])
+        .collect()
 }
 
 #[cfg(test)]

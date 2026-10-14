@@ -427,3 +427,68 @@ fn long_maps_sum_up_episodes_the_view_does_not_show() {
     assert_eq!(picked.map.len(), 11);
     assert_eq!(picked.map[5], "… 4 turns not listed …");
 }
+
+#[test]
+fn lexical_matches_add_summaries_of_what_the_picks_do_not_show() {
+    let session = retry_session();
+    let history = session.history();
+    let matches: Vec<usize> = ["t3", "a1", "u4", "a2"]
+        .into_iter()
+        .map(|id| session.index(id))
+        .collect();
+    let view = plan_view_with_matches(
+        &history,
+        &[pick(&session, "t3", Presentation::Full)],
+        &matches,
+        limits(1),
+    );
+
+    // t3 is picked already, a1 is outdated and u4 is recent, so only a2 is added.
+    assert_eq!(
+        shown(&view),
+        vec![
+            ("u1", Presentation::Full, Reason::TaskStart),
+            ("a2", Presentation::Summary, Reason::Lexical),
+            ("e2", Presentation::Summary, Reason::Dependency),
+            ("t3", Presentation::Full, Reason::Selected),
+            ("u4", Presentation::Full, Reason::Recent),
+        ]
+    );
+
+    let without_room = plan_view_with_matches(
+        &history,
+        &[pick(&session, "t3", Presentation::Full)],
+        &matches,
+        ViewLimits {
+            lexical_budget_tokens: 1,
+            ..limits(1)
+        },
+    );
+    assert!(!without_room.shows(session.index("a2")));
+}
+
+#[test]
+fn lexical_matches_go_before_any_pick_shrinks() {
+    let session = retry_session();
+    let history = session.history();
+    let picks = [pick(&session, "t3", Presentation::Full)];
+    let matches = [session.index("a2")];
+    let roomy = plan_view_with_matches(&history, &picks, &matches, limits(1));
+    assert!(roomy.shows(session.index("a2")));
+
+    let tight = plan_view_with_matches(
+        &history,
+        &picks,
+        &matches,
+        ViewLimits {
+            budget_tokens: roomy.tokens - 1,
+            ..limits(1)
+        },
+    );
+    assert!(!tight.shows(session.index("a2")));
+    assert_eq!(
+        shown(&tight)[2],
+        ("t3", Presentation::Full, Reason::Selected)
+    );
+    assert_eq!((tight.shrunk, tight.dropped), (0, 1));
+}

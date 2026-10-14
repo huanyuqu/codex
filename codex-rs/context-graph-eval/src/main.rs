@@ -174,12 +174,36 @@ struct RecallArgs {
     #[arg(long, default_value_t = 2)]
     recent_turns: usize,
 
+    /// Share of the budget, in percent, for summaries of lexical matches the screening did not
+    /// pick; 0 adds none.
+    #[arg(long, default_value_t = 15)]
+    lexical_share: u8,
+
     /// Print the items the model would see.
     #[arg(long)]
     render: bool,
 
     #[command(flatten)]
     models: ModelArgs,
+}
+
+/// How recall screens and budgets a view of `budget` tokens.
+fn recall_config(budget: u32, recent_turns: usize, lexical_share: u8) -> RecallConfig {
+    let lexical_share = lexical_share.min(50);
+    RecallConfig {
+        view: ViewLimits {
+            budget_tokens: budget,
+            recent_turns,
+            lexical_budget_tokens: budget.saturating_mul(u32::from(lexical_share)) / 100,
+            ..ViewLimits::default()
+        },
+        max_matches: if lexical_share == 0 {
+            0
+        } else {
+            RecallConfig::default().max_matches
+        },
+        ..RecallConfig::default()
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -235,6 +259,11 @@ struct ProbeRunArgs {
 
     #[arg(long, default_value_t = 2)]
     recent_turns: usize,
+
+    /// Share of the budget, in percent, for summaries of lexical matches the screening did not
+    /// pick; 0 adds none.
+    #[arg(long, default_value_t = 15)]
+    lexical_share: u8,
 
     #[arg(long, default_value_t = 200_000)]
     max_full_tokens: u32,
@@ -378,14 +407,7 @@ async fn recall(store: &LocalContextGraphStore, args: RecallArgs) -> anyhow::Res
         let model = args.read_model.as_deref().unwrap_or(&args.model);
         Some(args.models.model(&endpoint, model)?)
     };
-    let config = RecallConfig {
-        view: ViewLimits {
-            budget_tokens: args.budget,
-            recent_turns: args.recent_turns,
-            ..ViewLimits::default()
-        },
-        ..RecallConfig::default()
-    };
+    let config = recall_config(args.budget, args.recent_turns, args.lexical_share);
     let recall = Recaller::new(screen_model, read_model, config)
         .recall(&history, &args.question)
         .await?;
@@ -542,14 +564,7 @@ async fn probe_run(store: &LocalContextGraphStore, args: ProbeRunArgs) -> anyhow
     let endpoint = args.models.endpoint()?;
     let answer_model = args.models.model(&endpoint, &args.answer_model)?;
     let judge_model = args.models.model(&endpoint, &args.judge_model)?;
-    let config = RecallConfig {
-        view: ViewLimits {
-            budget_tokens: args.budget,
-            recent_turns: args.recent_turns,
-            ..ViewLimits::default()
-        },
-        ..RecallConfig::default()
-    };
+    let config = recall_config(args.budget, args.recent_turns, args.lexical_share);
     let mut recallers: HashMap<String, Recaller> = HashMap::new();
     for condition in &conditions {
         if let Condition::Recall { screen, read } = condition {
