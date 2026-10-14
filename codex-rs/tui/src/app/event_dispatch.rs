@@ -128,6 +128,7 @@ impl App {
                     | AppEvent::MergeCurrentSession { .. }
                     | AppEvent::OpenContextTree { .. }
                     | AppEvent::SwitchContextBranch { .. }
+                    | AppEvent::ContextTreeFork { .. }
                     | AppEvent::StartManagedWorktree {
                         mode: crate::app_event::ManagedWorktreeMode::Fork,
                         ..
@@ -561,8 +562,79 @@ impl App {
                     .merge_current_session(tui, app_server, primary_thread_id, args)
                     .await;
             }
-            AppEvent::ForkAtTurn { turn, name } => {
-                return Box::pin(self.fork_at_turn(tui, app_server, turn, name)).await;
+            AppEvent::ForkAtTurn {
+                turn,
+                name,
+                purpose,
+            } => {
+                return Box::pin(self.fork_at_turn(
+                    tui, app_server, /*source*/ None, turn, name, purpose,
+                ))
+                .await;
+            }
+            AppEvent::ContextTreeFork {
+                source_thread_id,
+                turn,
+            } => {
+                return Box::pin(self.fork_at_turn(
+                    tui,
+                    app_server,
+                    Some(source_thread_id),
+                    turn,
+                    /*name*/ None,
+                    /*purpose*/ None,
+                ))
+                .await;
+            }
+            AppEvent::ContextTreeLoadBranch {
+                thread_id,
+                branch_id,
+            } => {
+                Box::pin(self.load_context_tree_branch(app_server, thread_id, branch_id)).await;
+            }
+            AppEvent::ContextTreeSearch { thread_id, query } => {
+                Box::pin(self.search_context_tree(app_server, thread_id, query)).await;
+            }
+            AppEvent::ContextTreePreview {
+                thread_id,
+                title,
+                block_ids,
+            } => {
+                Box::pin(self.preview_context_blocks(tui, app_server, thread_id, title, block_ids))
+                    .await;
+            }
+            AppEvent::ContextBranchUpdate {
+                thread_id,
+                branch,
+                name,
+                purpose,
+                archived,
+                reopen_tree,
+            } => {
+                let params = codex_app_server_protocol::ContextGraphBranchUpdateParams {
+                    thread_id: thread_id.to_string(),
+                    branch,
+                    name,
+                    purpose,
+                    archived,
+                };
+                return Box::pin(self.update_context_branch(tui, app_server, params, reopen_tree))
+                    .await;
+            }
+            AppEvent::ContextRecall {
+                thread_id,
+                question,
+            } => {
+                Box::pin(self.context_recall(app_server, thread_id, question)).await;
+            }
+            AppEvent::RememberForkPurpose { name, purpose } => {
+                self.pending_fork_purpose = Some((name, purpose));
+            }
+            AppEvent::ContextGraphMergeDone { mode, result } => {
+                self.context_graph_merge_done(mode, result);
+            }
+            AppEvent::ContextRecallDone { result } => {
+                self.context_recall_done(result);
             }
             AppEvent::PreviewContextBranch { thread_id, branch } => {
                 Box::pin(self.preview_context_branch(app_server, thread_id, branch)).await;
@@ -574,7 +646,7 @@ impl App {
                 return Box::pin(self.fold_side_conversation(tui, app_server)).await;
             }
             AppEvent::ContextBranch { thread_id, name } => {
-                Box::pin(self.context_branch(app_server, thread_id, name)).await;
+                return Box::pin(self.context_branch(tui, app_server, thread_id, name)).await;
             }
             AppEvent::ContextMode { thread_id, mode } => {
                 Box::pin(self.context_mode(app_server, thread_id, mode)).await;
@@ -583,9 +655,12 @@ impl App {
                 name,
                 worktree,
                 prompt,
+                purpose,
             } => {
-                return Box::pin(self.fork_background_branch(tui, app_server, name, worktree, prompt))
-                    .await;
+                return Box::pin(self.fork_background_branch(
+                    tui, app_server, name, worktree, prompt, purpose,
+                ))
+                .await;
             }
             AppEvent::OpenContextTree { current_thread_id, target } => {
                 return Box::pin(self.open_context_tree(tui, app_server, current_thread_id, target)).await;
@@ -655,6 +730,13 @@ impl App {
                             let retained_input = from_locked_thread
                                 .then(|| self.chat_widget.capture_thread_input_state())
                                 .flatten();
+                            // A purpose given with this fork's name applies to it; one left by an
+                            // abandoned fork does not.
+                            let purpose = self
+                                .pending_fork_purpose
+                                .take()
+                                .filter(|(pending, _)| *pending == name)
+                                .map(|(_, purpose)| purpose);
                             let name_error = if let Some(name) = name {
                                 match app_server
                                     .thread_set_name(forked.session.thread_id, name.clone())
@@ -664,7 +746,8 @@ impl App {
                                         self.name_forked_branch(
                                             app_server,
                                             forked.session.thread_id,
-                                            name.clone(),
+                                            Some(name.clone()),
+                                            purpose,
                                         );
                                         forked.session.thread_name = Some(name);
                                         None
@@ -674,6 +757,12 @@ impl App {
                                     }
                                 }
                             } else {
+                                self.name_forked_branch(
+                                    app_server,
+                                    forked.session.thread_id,
+                                    /*name*/ None,
+                                    purpose,
+                                );
                                 None
                             };
                             if !app_server.uses_embedded_app_server() {

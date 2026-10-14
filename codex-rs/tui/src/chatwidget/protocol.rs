@@ -242,6 +242,7 @@ impl ChatWidget {
                 self.refresh_skills_for_current_cwd(/*force_reload*/ true);
             }
             ServerNotification::ContextGraphUpdated(_) => self.invalidate_context_branch_name(),
+            ServerNotification::ContextGraphCardsUpdated(_) => {}
             ServerNotification::ModelRerouted(_) => {}
             ServerNotification::ModelVerification(notification) => {
                 self.on_app_server_model_verification(&notification.verifications)

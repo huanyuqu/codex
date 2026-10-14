@@ -272,6 +272,7 @@ impl ChatWidget {
             status_line_project_root_name_cache: None,
             context_branch: None,
             context_branch_pending: None,
+            running_context_branches: 0,
             status_line_branch: None,
             status_line_branch_cwd: None,
             status_line_branch_pending: false,

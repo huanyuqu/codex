@@ -1,17 +1,22 @@
 //! In-session branches from the context graph, when the `context_graph` feature is on.
 //!
-//! A fork of a recorded chat joins its context graph as a new branch. `/tree` lists the
-//! branches of the current chat's graph and switches to one; `/merge` folds a branch's work into
-//! the current chat, or with `--reference` lets recall choose from the branch's history. Both go
-//! through the app server's `contextGraph/*` requests, so they work with remote servers too.
+//! A fork of a recorded chat joins its context graph as a new branch. `/tree` opens a view of the
+//! conversation's branches that expands to their turns and blocks, and switches, forks, merges,
+//! archives and searches from there; `/merge` merges branches into the current chat; `/branch`
+//! names, describes and archives them; `/context` and `/recall` show and steer recall. All of it
+//! goes through the app server's `contextGraph/*` requests, so it works with remote servers too.
+
+use std::collections::HashSet;
 
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ContextGraphBranch;
-use codex_app_server_protocol::ContextGraphBranchRenameParams;
 use codex_app_server_protocol::ContextGraphBranchStatus;
+use codex_app_server_protocol::ContextGraphBranchUpdateParams;
 use codex_app_server_protocol::ContextGraphMergeMode;
+use codex_app_server_protocol::ContextGraphMergeResponse;
 use codex_app_server_protocol::ContextGraphMode;
 use codex_app_server_protocol::ContextGraphReadResponse;
+use codex_app_server_protocol::ContextGraphView;
 use codex_app_server_protocol::ContextGraphViewsReadResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
@@ -20,16 +25,24 @@ use codex_app_server_protocol::Turn;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 
+use super::conversation_merge::merge_picker_items;
 use super::*;
 use crate::app_server_session::ForkGoalContinuation;
+use crate::bottom_pane::ContextTreeUpdate;
 use crate::bottom_pane::MultiSelectItem;
 
-/// One line about a branch: its turns, latest request and merges.
+/// Entries of the latest recalled view that `/context` lists.
+const SHOWN_VIEW_ENTRIES: usize = 8;
+
+/// One line about a branch: its turns, purpose, latest request and merges.
 fn describe(graph: &ContextGraphReadResponse, branch: &ContextGraphBranch) -> String {
     let mut parts = vec![match branch.turns {
         1 => "1 turn".to_string(),
         turns => format!("{turns} turns"),
     }];
+    if let Some(purpose) = &branch.purpose {
+        parts.push(format!("for: {purpose}"));
+    }
     if let Some(summary) = &branch.summary {
         parts.push(summary.clone());
     }
@@ -65,10 +78,29 @@ fn describe(graph: &ContextGraphReadResponse, branch: &ContextGraphBranch) -> St
     if !referenced_by.is_empty() {
         parts.push(format!("referenced by {}", referenced_by.join(", ")));
     }
-    if branch.status == ContextGraphBranchStatus::RolledBack {
-        parts.push("rolled back".to_string());
+    match branch.status {
+        ContextGraphBranchStatus::RolledBack => parts.push("rolled back".to_string()),
+        ContextGraphBranchStatus::Archived => parts.push("archived".to_string()),
+        ContextGraphBranchStatus::Active | ContextGraphBranchStatus::Merged => {}
     }
     parts.join(" · ")
+}
+
+/// One line about each branch for the tree; background branches still at work in `running`
+/// say so.
+fn tree_descriptions(graph: &ContextGraphReadResponse, running: &HashSet<ThreadId>) -> Vec<String> {
+    graph
+        .branches
+        .iter()
+        .map(|branch| {
+            let description = describe(graph, branch);
+            if openable_thread(branch).is_some_and(|thread_id| running.contains(&thread_id)) {
+                format!("working in the background · {description}")
+            } else {
+                description
+            }
+        })
+        .collect()
 }
 
 /// The tree lines in front of each branch name: `├ ` or `└ ` before a fork, and `│ ` where an
@@ -108,50 +140,8 @@ fn tree_labels(branches: &[ContextGraphBranch]) -> Vec<String> {
         .collect()
 }
 
-/// The rows of the `/tree` picker; selecting one switches `current_thread_id` to its chat.
-fn tree_items(graph: &ContextGraphReadResponse, current_thread_id: ThreadId) -> Vec<SelectionItem> {
-    let labels = tree_labels(&graph.branches);
-    graph
-        .branches
-        .iter()
-        .zip(labels)
-        .map(|(branch, label)| {
-            let target_thread_id = openable_thread(branch);
-            let actions: Vec<crate::bottom_pane::SelectionAction> = target_thread_id
-                .map(|target_thread_id| {
-                    Box::new(move |tx: &AppEventSender| {
-                        tx.send(AppEvent::SwitchContextBranch {
-                            current_thread_id,
-                            target_thread_id,
-                        })
-                    }) as crate::bottom_pane::SelectionAction
-                })
-                .into_iter()
-                .collect();
-            SelectionItem {
-                name: label,
-                description: Some(describe(graph, branch)),
-                search_value: Some(format!(
-                    "{} {} {}",
-                    branch.name,
-                    branch.branch_id,
-                    branch.thread_id.as_deref().unwrap_or_default()
-                )),
-                is_current: branch.current,
-                is_disabled: target_thread_id.is_none(),
-                disabled_reason: target_thread_id
-                    .is_none()
-                    .then(|| "This history has no chat to open.".to_string()),
-                actions,
-                dismiss_on_select: true,
-                ..Default::default()
-            }
-        })
-        .collect()
-}
-
-/// What `/context` shows: the mode, the branch, and the latest recalls or why they could not
-/// be read.
+/// What `/context` shows: the mode, the branch, the latest recalls with what the latest one
+/// chose, and how well recall did, or why the recalls could not be read.
 fn context_status(
     graph: &ContextGraphReadResponse,
     views: Result<&ContextGraphViewsReadResponse, &String>,
@@ -167,24 +157,70 @@ fn context_status(
             graph.branches.len()
         ));
     }
-    match views {
-        Ok(views) if views.views.is_empty() => {
-            lines.push("No recalled context yet.".to_string());
+    let views = match views {
+        Ok(views) => views,
+        Err(error) => {
+            lines.push(format!("Could not read recalled views: {error}"));
+            return lines;
         }
-        Ok(views) => {
-            lines.push("Recent recalls:".to_string());
-            for view in &views.views {
-                let question: String = view.question.chars().take(60).collect();
-                lines.push(format!(
-                    "  {} blocks, about {} of {} tokens, {:.1}s: {question}",
-                    view.blocks,
-                    view.tokens,
-                    view.budget_tokens,
-                    view.latency_ms as f64 / 1000.0
-                ));
-            }
+    };
+    if views.views.is_empty() {
+        lines.push("No recalled context yet.".to_string());
+    } else {
+        lines.push("Recent recalls:".to_string());
+        for view in &views.views {
+            let question: String = view.question.chars().take(60).collect();
+            lines.push(format!(
+                "  {} blocks, about {} of {} tokens, {:.1}s: {question}",
+                view.blocks,
+                view.tokens,
+                view.budget_tokens,
+                view.latency_ms as f64 / 1000.0
+            ));
         }
-        Err(error) => lines.push(format!("Could not read recalled views: {error}")),
+        if let Some(latest) = views.views.first() {
+            lines.extend(view_entries(latest));
+        }
+    }
+    if let Some(feedback) = &views.feedback
+        && (feedback.expanded > 0 || feedback.requested > 0)
+    {
+        lines.push(format!(
+            "The model read {} blocks with context_expand; recall had left out {} of them. You \
+             asked for {} recalls.",
+            feedback.expanded, feedback.missed, feedback.requested
+        ));
+    }
+    lines
+}
+
+/// The blocks a recalled view chose, one line each, ending with how many are not listed.
+fn view_entries(view: &ContextGraphView) -> Vec<String> {
+    let chosen: Vec<_> = view
+        .entries
+        .iter()
+        .filter(|entry| entry.reason != "recent")
+        .collect();
+    if chosen.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec!["What the latest recall chose besides the recent turns:".to_string()];
+    for entry in chosen.iter().take(SHOWN_VIEW_ENTRIES) {
+        let title = if entry.title.is_empty() {
+            entry.block_id.as_str()
+        } else {
+            entry.title.as_str()
+        };
+        lines.push(format!(
+            "  {} ({}, {}, {} tokens)",
+            title,
+            entry.reason.replace('_', " "),
+            entry.presentation,
+            entry.tokens
+        ));
+    }
+    if chosen.len() > SHOWN_VIEW_ENTRIES {
+        lines.push(format!("  and {} more", chosen.len() - SHOWN_VIEW_ENTRIES));
     }
     lines
 }
@@ -207,20 +243,127 @@ fn find<'a>(graph: &'a ContextGraphReadResponse, name: &str) -> Option<&'a Conte
     })
 }
 
-/// Splits `/merge` arguments into branch names and the merge mode.
-fn merge_args(args: Vec<String>) -> (Vec<String>, ContextGraphMergeMode) {
-    let mut mode = ContextGraphMergeMode::Fold;
-    let mut names = Vec::new();
-    for arg in args {
+/// What `/merge` was asked to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MergeRequest {
+    names: Vec<String>,
+    mode: ContextGraphMergeMode,
+    goal: Option<String>,
+    code: bool,
+}
+
+impl MergeRequest {
+    /// The flags of the request, to carry through the merge picker.
+    fn flags(&self) -> Vec<String> {
+        let mut flags = match self.mode {
+            ContextGraphMergeMode::Reference => vec!["--reference".to_string()],
+            ContextGraphMergeMode::Synthesize => vec!["--synthesize".to_string()],
+            ContextGraphMergeMode::Inline => vec!["--inline".to_string()],
+            ContextGraphMergeMode::Fold => Vec::new(),
+        };
+        if let Some(goal) = &self.goal {
+            flags.extend(["--goal".to_string(), goal.clone()]);
+        }
+        if self.code {
+            flags.push("--code".to_string());
+        }
+        flags
+    }
+}
+
+const MERGE_USAGE: &str = "Usage: /merge [BRANCH...] [--reference|--synthesize|--inline] \
+                           [--goal TEXT] [--code]";
+
+/// Parses `/merge` arguments: branch names or chat IDs, a mode flag, `--goal TEXT` and
+/// `--code`.
+fn merge_args(args: Vec<String>) -> Result<MergeRequest, String> {
+    let mut request = MergeRequest {
+        names: Vec::new(),
+        mode: ContextGraphMergeMode::Fold,
+        goal: None,
+        code: false,
+    };
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--reference" | "-r" => mode = ContextGraphMergeMode::Reference,
-            "--synthesize" | "-s" => mode = ContextGraphMergeMode::Synthesize,
-            "--inline" => mode = ContextGraphMergeMode::Inline,
-            "--fold" => mode = ContextGraphMergeMode::Fold,
-            _ => names.push(arg),
+            "--reference" | "-r" => request.mode = ContextGraphMergeMode::Reference,
+            "--synthesize" | "-s" => request.mode = ContextGraphMergeMode::Synthesize,
+            "--inline" => request.mode = ContextGraphMergeMode::Inline,
+            "--fold" => request.mode = ContextGraphMergeMode::Fold,
+            "--code" => request.code = true,
+            "--goal" | "-g" => {
+                let goal = args
+                    .next()
+                    .filter(|goal| !goal.trim().is_empty() && !goal.starts_with("--"))
+                    .ok_or_else(|| MERGE_USAGE.to_string())?;
+                request.goal = Some(goal);
+            }
+            flag if flag.starts_with("--") => return Err(MERGE_USAGE.to_string()),
+            _ => request.names.push(arg),
         }
     }
-    (names, mode)
+    Ok(request)
+}
+
+/// What the chat says after a merge.
+fn merge_report(
+    mode: ContextGraphMergeMode,
+    response: &ContextGraphMergeResponse,
+) -> (String, String) {
+    let names = response
+        .merged
+        .iter()
+        .map(|merged| merged.branch_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let turns: u32 = response.merged.iter().map(|merged| merged.turns).sum();
+    let turns = match turns {
+        1 => "1 turn".to_string(),
+        turns => format!("{turns} turns"),
+    };
+    let what = if response.merged.len() == 1 {
+        "branch"
+    } else {
+        "branches"
+    };
+    let (verb, hint) = match mode {
+        ContextGraphMergeMode::Fold => ("Merged", "The next turn sees a summary of their work."),
+        ContextGraphMergeMode::Synthesize => (
+            "Merged",
+            "The next turn sees a merge note a model wrote from their histories.",
+        ),
+        ContextGraphMergeMode::Inline => ("Merged", "The next turn sees their histories."),
+        ContextGraphMergeMode::Reference => {
+            ("Referenced", "Recall can now choose from their histories.")
+        }
+    };
+    let mut message = format!("{verb} {what} {names} ({turns}).");
+    for merged in &response.merged {
+        let Some(code) = &merged.code else {
+            continue;
+        };
+        let files = match code.files.len() {
+            1 => "1 file".to_string(),
+            files => format!("{files} files"),
+        };
+        message.push_str(&match (&code.merge_commit, code.conflicts.is_empty()) {
+            (_, false) => format!(
+                "\nCode of {}: the merge stopped at conflicts in {}; resolve them and commit.",
+                merged.branch_name,
+                code.conflicts.join(", ")
+            ),
+            (Some(commit), true) => format!(
+                "\nCode of {}: merged in {} ({files}).",
+                merged.branch_name,
+                commit.chars().take(12).collect::<String>()
+            ),
+            (None, true) => format!(
+                "\nCode of {}: nothing this workspace lacks.",
+                merged.branch_name
+            ),
+        });
+    }
+    (message, hint.to_string())
 }
 
 fn mode_name(mode: ContextGraphMode) -> &'static str {
@@ -231,8 +374,46 @@ fn mode_name(mode: ContextGraphMode) -> &'static str {
     }
 }
 
+/// What `/branch` was asked to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BranchCommand {
+    Show,
+    Rename(String),
+    Purpose(Option<String>),
+    Archive(String, bool),
+}
+
+const BRANCH_USAGE: &str = "Usage: /branch [rename NAME | purpose [TEXT] | archive BRANCH | \
+                            unarchive BRANCH]";
+
+fn branch_command(args: Option<&str>) -> Result<BranchCommand, String> {
+    let Some(args) = args.map(str::trim).filter(|args| !args.is_empty()) else {
+        return Ok(BranchCommand::Show);
+    };
+    let (word, rest) = args
+        .split_once(char::is_whitespace)
+        .map_or((args, ""), |(word, rest)| (word, rest.trim()));
+    let name = |rest: &str| {
+        (!rest.is_empty() && !rest.contains(char::is_whitespace))
+            .then(|| rest.to_string())
+            .ok_or_else(|| BRANCH_USAGE.to_string())
+    };
+    match word {
+        "status" | "show" if rest.is_empty() => Ok(BranchCommand::Show),
+        "rename" => name(rest).map(BranchCommand::Rename),
+        "purpose" => Ok(BranchCommand::Purpose(
+            (!rest.is_empty()).then(|| rest.to_string()),
+        )),
+        "archive" => name(rest).map(|name| BranchCommand::Archive(name, true)),
+        "unarchive" | "restore" => name(rest).map(|name| BranchCommand::Archive(name, false)),
+        // A single word renames the branch, as in earlier versions.
+        _ if rest.is_empty() => Ok(BranchCommand::Rename(word.to_string())),
+        _ => Err(BRANCH_USAGE.to_string()),
+    }
+}
+
 impl App {
-    /// Whether `/tree` and `/merge` work on the context graph instead of saved chats.
+    /// Whether `/tree` and `/merge` work, which needs the context graph.
     pub(super) fn context_graph_branches_enabled(&self) -> bool {
         self.config.features.enabled(Feature::ContextGraph)
     }
@@ -289,16 +470,17 @@ impl App {
                 }
             };
         }
-
-        let current = graph.branches.iter().position(|branch| branch.current);
-        let items = tree_items(&graph, current_thread_id);
-        self.chat_widget.show_context_tree_picker(items, current);
+        let labels = tree_labels(&graph.branches);
+        let descriptions = tree_descriptions(&graph, &self.running_background_branches);
+        self.chat_widget
+            .show_context_tree(current_thread_id, &graph, labels, descriptions);
         tui.frame_requester().schedule_frame();
         Ok(AppRunControl::Continue)
     }
 
-    /// Merges the branches `args` names into the current chat, folding them unless `args` has
-    /// `--reference`; without names, opens a picker.
+    /// Merges the branches `args` names into the current chat as one note, folding them unless
+    /// `args` has another mode. Without names, a picker lists the conversation's other branches
+    /// and other saved chats.
     pub(super) async fn merge_graph_branches(
         &mut self,
         tui: &mut tui::Tui,
@@ -306,16 +488,31 @@ impl App {
         primary_thread_id: ThreadId,
         args: Vec<String>,
     ) -> Result<AppRunControl> {
-        let (names, mode) = merge_args(args);
-        if names.is_empty() {
-            let Some(graph) = self.read_context_graph(app_server, primary_thread_id).await else {
+        let request = match merge_args(args) {
+            Ok(request) => request,
+            Err(usage) => {
+                self.chat_widget.add_error_message(usage);
                 return Ok(AppRunControl::Continue);
+            }
+        };
+        if request.names.is_empty() {
+            let graph = match app_server.context_graph_read(primary_thread_id).await {
+                Ok(graph) => graph,
+                Err(error) => {
+                    self.chat_widget
+                        .add_error_message(format!("Could not load the branch tree: {error:#}"));
+                    return Ok(AppRunControl::Continue);
+                }
             };
-            let items: Vec<MultiSelectItem> = graph
+            let mut items: Vec<MultiSelectItem> = graph
                 .branches
                 .iter()
                 .filter(|branch| {
-                    !branch.current && branch.status != ContextGraphBranchStatus::RolledBack
+                    !branch.current
+                        && matches!(
+                            branch.status,
+                            ContextGraphBranchStatus::Active | ContextGraphBranchStatus::Merged
+                        )
                 })
                 .map(|branch| MultiSelectItem {
                     id: branch.branch_id.clone(),
@@ -325,80 +522,104 @@ impl App {
                     ..Default::default()
                 })
                 .collect();
+            let in_graph: HashSet<String> = graph
+                .branches
+                .iter()
+                .filter_map(|branch| branch.thread_id.clone())
+                .collect();
+            match merge_picker_items(app_server.request_handle(), primary_thread_id, &in_graph)
+                .await
+            {
+                Ok(saved) => items.extend(saved),
+                Err(error) => tracing::warn!("could not list saved chats to merge: {error:#}"),
+            }
             if items.is_empty() {
-                self.chat_widget
-                    .add_info_message("This chat has no other branches.".into(), None);
+                self.chat_widget.add_info_message(
+                    "Nothing to merge: this chat has no other branches or saved chats.".into(),
+                    None,
+                );
             } else {
-                let carried = match mode {
-                    ContextGraphMergeMode::Reference => vec!["--reference".to_string()],
-                    ContextGraphMergeMode::Synthesize => vec!["--synthesize".to_string()],
-                    ContextGraphMergeMode::Inline => vec!["--inline".to_string()],
-                    ContextGraphMergeMode::Fold => Vec::new(),
-                };
-                self.chat_widget
-                    .show_conversation_merge_picker(primary_thread_id, items, carried);
+                self.chat_widget.show_conversation_merge_picker(
+                    primary_thread_id,
+                    items,
+                    request.flags(),
+                );
             }
             return Ok(AppRunControl::Continue);
         }
 
-        for name in names {
-            match app_server
-                .context_graph_merge(primary_thread_id, name.clone(), mode)
+        // A synthesized merge calls a model, so the merge runs in the background while the
+        // chat shows its progress.
+        let mode = request.mode;
+        self.chat_widget
+            .set_conversation_merge_status(Some(format!("Merging {}…", request.names.join(", "))));
+        let handle = app_server.request_handle();
+        let tx = self.app_event_tx.clone();
+        let params = codex_app_server_protocol::ContextGraphMergeParams {
+            thread_id: primary_thread_id.to_string(),
+            branches: request.names,
+            mode,
+            goal: request.goal,
+            code: request.code,
+        };
+        tokio::spawn(async move {
+            let result = handle
+                .request_typed::<ContextGraphMergeResponse>(ClientRequest::ContextGraphMerge {
+                    request_id: RequestId::String(format!(
+                        "context-graph-merge-{}",
+                        uuid::Uuid::new_v4()
+                    )),
+                    params,
+                })
                 .await
-            {
-                Ok(merged) => {
-                    let turns = match merged.turns {
-                        1 => "1 turn".to_string(),
-                        turns => format!("{turns} turns"),
-                    };
-                    let (verb, hint) = match mode {
-                        ContextGraphMergeMode::Fold => (
-                            "Merged",
-                            "The next turn sees a summary of what the branch did.",
-                        ),
-                        ContextGraphMergeMode::Synthesize => (
-                            "Merged",
-                            "The next turn sees a merge note a model wrote from the branch.",
-                        ),
-                        ContextGraphMergeMode::Inline => {
-                            ("Merged", "The next turn sees the branch's history itself.")
-                        }
-                        ContextGraphMergeMode::Reference => (
-                            "Referenced",
-                            "Recall can now choose from the branch's history.",
-                        ),
-                    };
-                    self.chat_widget.add_info_message(
-                        format!("{verb} branch {} ({turns}).", merged.branch_name),
-                        Some(hint.into()),
-                    );
-                }
-                Err(error) => self
-                    .chat_widget
-                    .add_error_message(format!("Could not merge {name}: {error:#}")),
-            }
-        }
+                .map_err(|error| error.to_string());
+            tx.send(AppEvent::ContextGraphMergeDone { mode, result });
+        });
         tui.frame_requester().schedule_frame();
         Ok(AppRunControl::Continue)
     }
 
-    /// Names the branch of a new fork once its recorder has stored it.
+    /// Reports a merge that ran in the background.
+    pub(super) fn context_graph_merge_done(
+        &mut self,
+        mode: ContextGraphMergeMode,
+        result: std::result::Result<ContextGraphMergeResponse, String>,
+    ) {
+        self.chat_widget.set_conversation_merge_status(None);
+        match result {
+            Ok(response) => {
+                let (message, hint) = merge_report(mode, &response);
+                self.chat_widget.add_info_message(message, Some(hint));
+            }
+            Err(error) => self
+                .chat_widget
+                .add_error_message(format!("Could not merge: {error}")),
+        }
+    }
+}
+
+impl App {
+    /// Names a new fork's branch and records what it is for, once its recorder has stored it.
     pub(super) fn name_forked_branch(
         &self,
         app_server: &AppServerSession,
         thread_id: ThreadId,
-        name: String,
+        name: Option<String>,
+        purpose: Option<String>,
     ) {
-        if !self.context_graph_branches_enabled() {
+        if !self.context_graph_branches_enabled() || (name.is_none() && purpose.is_none()) {
             return;
         }
         let handle = app_server.request_handle();
         tokio::spawn(async move {
-            let request = ClientRequest::ContextGraphBranchRename {
+            let request = ClientRequest::ContextGraphBranchUpdate {
                 request_id: RequestId::String(format!("context-graph-fork-name-{thread_id}")),
-                params: ContextGraphBranchRenameParams {
+                params: ContextGraphBranchUpdateParams {
                     thread_id: thread_id.to_string(),
+                    branch: None,
                     name,
+                    purpose,
+                    archived: None,
                 },
             };
             match handle.request(request).await {
@@ -473,32 +694,98 @@ impl App {
         self.chat_widget.set_context_branch_name(thread_id, name);
     }
 
-    /// Shows the current chat's branch, or renames it to `name`.
+    /// Runs `/branch`: shows the current chat's branch, or renames it, sets what it is for, or
+    /// archives or restores a branch.
     pub(super) async fn context_branch(
         &mut self,
+        tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
-        name: Option<String>,
-    ) {
+        args: Option<String>,
+    ) -> Result<AppRunControl> {
         if !self.context_graph_branches_enabled() {
             self.chat_widget
                 .add_error_message("Turn on the context_graph feature to use branches.".into());
-            return;
+            return Ok(AppRunControl::Continue);
         }
-        if let Some(name) = name {
-            match app_server
-                .context_graph_branch_rename(thread_id, name.clone())
-                .await
-            {
-                Ok(()) => self
-                    .chat_widget
-                    .add_info_message(format!("This branch is now called {name}."), None),
-                Err(error) => self
-                    .chat_widget
-                    .add_error_message(format!("Could not rename the branch: {error:#}")),
+        let update = |branch: Option<String>| ContextGraphBranchUpdateParams {
+            thread_id: thread_id.to_string(),
+            branch,
+            name: None,
+            purpose: None,
+            archived: None,
+        };
+        match branch_command(args.as_deref()) {
+            Err(usage) => self.chat_widget.add_error_message(usage),
+            Ok(BranchCommand::Show) => self.show_context_branch(app_server, thread_id).await,
+            Ok(BranchCommand::Purpose(None)) => {
+                let Some(graph) = self.read_context_graph(app_server, thread_id).await else {
+                    return Ok(AppRunControl::Continue);
+                };
+                let purpose = graph
+                    .branches
+                    .iter()
+                    .find(|branch| branch.current)
+                    .and_then(|branch| branch.purpose.clone());
+                self.chat_widget.add_info_message(
+                    match purpose {
+                        Some(purpose) => format!("This branch is for: {purpose}"),
+                        None => "This branch has no purpose set.".to_string(),
+                    },
+                    Some("/branch purpose TEXT sets it.".into()),
+                );
             }
-            return;
+            Ok(BranchCommand::Rename(name)) => {
+                let params = ContextGraphBranchUpdateParams {
+                    name: Some(name.clone()),
+                    ..update(None)
+                };
+                match app_server.context_graph_branch_update(params).await {
+                    Ok(()) => self
+                        .chat_widget
+                        .add_info_message(format!("This branch is now called {name}."), None),
+                    Err(error) => self
+                        .chat_widget
+                        .add_error_message(format!("Could not rename the branch: {error:#}")),
+                }
+            }
+            Ok(BranchCommand::Purpose(Some(purpose))) => {
+                let params = ContextGraphBranchUpdateParams {
+                    purpose: Some(purpose.clone()),
+                    ..update(None)
+                };
+                match app_server.context_graph_branch_update(params).await {
+                    Ok(()) => self.chat_widget.add_info_message(
+                        format!("This branch is for: {purpose}"),
+                        Some("The model is told at its next turn.".into()),
+                    ),
+                    Err(error) => self
+                        .chat_widget
+                        .add_error_message(format!("Could not set the purpose: {error:#}")),
+                }
+            }
+            Ok(BranchCommand::Archive(name, archived)) => {
+                return self
+                    .update_context_branch(
+                        tui,
+                        app_server,
+                        ContextGraphBranchUpdateParams {
+                            archived: Some(archived),
+                            ..update(Some(name))
+                        },
+                        /*reopen_tree*/ false,
+                    )
+                    .await;
+            }
         }
+        Ok(AppRunControl::Continue)
+    }
+
+    async fn show_context_branch(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+    ) {
         let Some(graph) = self.read_context_graph(app_server, thread_id).await else {
             return;
         };
@@ -541,7 +828,53 @@ impl App {
             "{} branches in this conversation; /tree lists them.",
             graph.branches.len()
         ));
-        self.chat_widget.add_info_message(lines.join("\n"), None);
+        self.chat_widget.add_info_message(
+            lines.join("\n"),
+            Some("/branch rename NAME, /branch purpose TEXT, /branch archive BRANCH".into()),
+        );
+    }
+
+    /// Changes a branch, then reopens `/tree` when `reopen_tree` is set.
+    pub(super) async fn update_context_branch(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        params: ContextGraphBranchUpdateParams,
+        reopen_tree: bool,
+    ) -> Result<AppRunControl> {
+        let Ok(thread_id) = ThreadId::from_string(&params.thread_id) else {
+            return Ok(AppRunControl::Continue);
+        };
+        let branch = params
+            .branch
+            .clone()
+            .unwrap_or_else(|| "this branch".to_string());
+        let archived = params.archived;
+        match app_server.context_graph_branch_update(params).await {
+            Ok(()) => {
+                if let Some(archived) = archived {
+                    let (message, hint) = if archived {
+                        (
+                            format!("Archived branch {branch}."),
+                            format!("Its history stays; /branch unarchive {branch} restores it."),
+                        )
+                    } else {
+                        (format!("Restored branch {branch}."), String::new())
+                    };
+                    self.chat_widget
+                        .add_info_message(message, (!hint.is_empty()).then_some(hint));
+                }
+            }
+            Err(error) => {
+                self.chat_widget
+                    .add_error_message(format!("Could not change branch {branch}: {error:#}"));
+                return Ok(AppRunControl::Continue);
+            }
+        }
+        if reopen_tree {
+            return self.open_graph_tree(tui, app_server, thread_id, None).await;
+        }
+        Ok(AppRunControl::Continue)
     }
 
     /// Shows how the current chat manages its context, or switches it to `mode`.
@@ -593,8 +926,172 @@ impl App {
         let lines = context_status(&graph, views.as_ref());
         self.chat_widget.add_info_message(
             lines.join("\n"),
-            Some("/context full|auto|recall switches the mode.".into()),
+            Some("/context full|auto|recall switches the mode; /recall rebuilds now.".into()),
         );
+    }
+
+    /// Runs `/recall`: rebuilds the history by recall before the next turn, or with a
+    /// question, shows what recall would choose for it.
+    pub(super) async fn context_recall(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+        question: Option<String>,
+    ) {
+        if !self.context_graph_branches_enabled() {
+            self.chat_widget
+                .add_error_message("Turn on the context_graph feature to use recall.".into());
+            return;
+        }
+        let rebuild = question.is_none();
+        if rebuild {
+            let result = app_server
+                .context_graph_recall(thread_id, None, /*rebuild*/ true)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            self.context_recall_done(result);
+            return;
+        }
+        // A preview screens the history with a model, so it runs in the background.
+        self.chat_widget
+            .set_context_operation_status("Recalling", Some("Screening the history…".into()));
+        let handle = app_server.request_handle();
+        let tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = handle
+                .request_typed::<codex_app_server_protocol::ContextGraphRecallResponse>(
+                    ClientRequest::ContextGraphRecall {
+                        request_id: RequestId::String(format!(
+                            "context-graph-recall-{}",
+                            uuid::Uuid::new_v4()
+                        )),
+                        params: codex_app_server_protocol::ContextGraphRecallParams {
+                            thread_id: thread_id.to_string(),
+                            question,
+                            rebuild: false,
+                        },
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string());
+            tx.send(AppEvent::ContextRecallDone { result });
+        });
+    }
+
+    /// Reports a recall request or preview.
+    pub(super) fn context_recall_done(
+        &mut self,
+        result: std::result::Result<codex_app_server_protocol::ContextGraphRecallResponse, String>,
+    ) {
+        self.chat_widget
+            .set_context_operation_status("Recalling", /*text*/ None);
+        match result {
+            Ok(response) => match response.view {
+                Some(view) => {
+                    let mut lines = vec![format!(
+                        "Recall would show {} blocks, about {} of {} tokens ({:.1}s, {}).",
+                        view.blocks,
+                        view.tokens,
+                        view.budget_tokens,
+                        view.latency_ms as f64 / 1000.0,
+                        view.selector
+                    )];
+                    lines.extend(view_entries(&view));
+                    self.chat_widget.add_info_message(
+                        lines.join("\n"),
+                        Some("Nothing changed; /recall without a question rebuilds.".into()),
+                    );
+                }
+                None => self.chat_widget.add_info_message(
+                    "The next turn rebuilds this chat's history by recall.".into(),
+                    Some("/context shows what it chose.".into()),
+                ),
+            },
+            Err(error) => self
+                .chat_widget
+                .add_error_message(format!("Recall failed: {error}")),
+        }
+    }
+
+    /// Reads the turns of a branch for the open `/tree` view.
+    pub(super) async fn load_context_tree_branch(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+        branch_id: String,
+    ) {
+        let result = app_server
+            .context_graph_branch_read(thread_id, branch_id.clone())
+            .await
+            .map(|branch| branch.turns)
+            .map_err(|error| format!("{error:#}"));
+        self.chat_widget
+            .update_context_tree(&ContextTreeUpdate::Turns { branch_id, result });
+    }
+
+    /// Searches the cards of every branch for the open `/tree` view.
+    pub(super) async fn search_context_tree(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+        query: String,
+    ) {
+        let result = app_server
+            .context_graph_search(thread_id, query.clone())
+            .await
+            .map(|search| search.hits)
+            .map_err(|error| format!("{error:#}"));
+        self.chat_widget
+            .update_context_tree(&ContextTreeUpdate::Search { query, result });
+    }
+
+    /// Shows blocks of the conversation in the pager.
+    pub(super) async fn preview_context_blocks(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+        title: String,
+        block_ids: Vec<String>,
+    ) {
+        let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
+        for block_id in block_ids {
+            match app_server
+                .context_graph_block_read(thread_id, block_id.clone())
+                .await
+            {
+                Ok(block) => {
+                    lines.push(
+                        format!(
+                            "── {} · {} ──",
+                            block.kind.replace('_', " "),
+                            block.block_id
+                        )
+                        .dim()
+                        .into(),
+                    );
+                    lines.extend(
+                        block
+                            .text
+                            .lines()
+                            .map(|line| ratatui::text::Line::from(line.to_string())),
+                    );
+                    lines.push(ratatui::text::Line::default());
+                }
+                Err(error) => lines.push(
+                    format!("Could not read block {block_id}: {error:#}")
+                        .red()
+                        .into(),
+                ),
+            }
+        }
+        let _ = tui.enter_alt_screen();
+        self.overlay = Some(Overlay::new_static_with_lines(
+            lines,
+            title,
+            self.keymap.pager.clone(),
+        ));
+        tui.frame_requester().schedule_frame();
     }
 }
 
@@ -608,6 +1105,7 @@ impl App {
         name: Option<String>,
         worktree: bool,
         prompt: String,
+        purpose: Option<String>,
     ) -> Result<AppRunControl> {
         let Some(source_thread_id) = self.chat_widget.thread_id() else {
             self.chat_widget.add_error_message(
@@ -691,7 +1189,7 @@ impl App {
         if let Err(error) = app_server.thread_set_name(thread_id, name.clone()).await {
             tracing::warn!("could not name the background branch: {error:#}");
         }
-        self.name_forked_branch(app_server, thread_id, name.clone());
+        self.name_forked_branch(app_server, thread_id, Some(name.clone()), purpose);
         let turn = self
             .chat_widget
             .branch_user_turn(prompt, forked.session.cwd.to_path_buf());
@@ -703,6 +1201,9 @@ impl App {
         // Routing the branch through its own channel queues its approvals until it is opened.
         self.ensure_thread_channel(thread_id);
         self.background_branches.insert(thread_id, name.clone());
+        self.running_background_branches.insert(thread_id);
+        self.chat_widget
+            .set_running_context_branches(self.running_background_branches.len());
         let place = match &checkout {
             Some((_, created)) => format!(" in {}", created.cwd.display()),
             None => String::new(),
@@ -764,6 +1265,9 @@ impl App {
         if !matches!(notification, ServerNotification::TurnCompleted(_)) {
             return false;
         }
+        self.running_background_branches.remove(&thread_id);
+        self.chat_widget
+            .set_running_context_branches(self.running_background_branches.len());
         let fold = self.config.context_graph.on_branch_complete
             == codex_config::types::BranchCompletion::Fold;
         let primary = self.chat_widget.thread_id();
@@ -773,8 +1277,10 @@ impl App {
                     request_id: RequestId::String(format!("context-graph-fold-{thread_id}")),
                     params: codex_app_server_protocol::ContextGraphMergeParams {
                         thread_id: primary.to_string(),
-                        branch: thread_id.to_string(),
+                        branches: vec![thread_id.to_string()],
                         mode: ContextGraphMergeMode::Fold,
+                        goal: None,
+                        code: false,
                     },
                 };
                 match app_server.request_handle().request(request).await {
@@ -815,20 +1321,24 @@ impl App {
         config
     }
 
-    /// Forks the current chat after its turn `turn`, counted from 1, and switches to the fork.
+    /// Forks the chat `source`, the current one when `None`, after its turn `turn`, counted
+    /// from 1, and switches to the fork.
     pub(super) async fn fork_at_turn(
         &mut self,
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
+        source: Option<ThreadId>,
         turn: usize,
         name: Option<String>,
+        purpose: Option<String>,
     ) -> Result<AppRunControl> {
-        let Some(thread_id) = self.chat_widget.thread_id() else {
+        let Some(current_thread_id) = self.chat_widget.thread_id() else {
             self.chat_widget.add_error_message(
                 "Session is still starting; try /fork again in a moment.".into(),
             );
             return Ok(AppRunControl::Continue);
         };
+        let thread_id = source.unwrap_or(current_thread_id);
         if self.chat_widget.is_user_turn_pending_or_running() {
             self.chat_widget.add_error_message(
                 "Wait for the current turn to finish before forking from an earlier turn.".into(),
@@ -882,9 +1392,9 @@ impl App {
         if let Err(error) = app_server.thread_set_name(fork_id, name.clone()).await {
             tracing::warn!("could not name the fork: {error:#}");
         }
-        self.name_forked_branch(app_server, fork_id, name.clone());
+        self.name_forked_branch(app_server, fork_id, Some(name.clone()), purpose);
         let control = self
-            .switch_context_branch(tui, app_server, thread_id, fork_id)
+            .switch_context_branch(tui, app_server, current_thread_id, fork_id)
             .await?;
         if self.chat_widget.thread_id() == Some(fork_id) {
             self.chat_widget.add_info_message(
@@ -936,7 +1446,12 @@ impl App {
         if let Err(error) = app_server.thread_set_name(fork_id, name.clone()).await {
             tracing::warn!("could not name the edit branch: {error:#}");
         }
-        self.name_forked_branch(app_server, fork_id, name.clone());
+        self.name_forked_branch(
+            app_server,
+            fork_id,
+            Some(name.clone()),
+            /*purpose*/ None,
+        );
         let control = self
             .switch_context_branch(tui, app_server, thread_id, fork_id)
             .await?;
@@ -1067,6 +1582,7 @@ mod tests {
             turns,
             last_request: Some(format!("request of {name}")),
             summary: None,
+            purpose: None,
             current: false,
         }
     }
@@ -1159,18 +1675,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tree_picker_shows_the_branches_as_a_tree() {
+    async fn tree_view_shows_the_branches_as_a_tree() {
         let mut app = crate::app::test_support::make_test_app().await;
         let graph = sample_graph();
-        let items = tree_items(&graph, ThreadId::new());
-        app.chat_widget.show_context_tree_picker(items, Some(0));
+        let labels = tree_labels(&graph.branches);
+        let running = graph.branches[1]
+            .thread_id
+            .as_deref()
+            .and_then(|id| ThreadId::from_string(id).ok())
+            .into_iter()
+            .collect();
+        let descriptions = tree_descriptions(&graph, &running);
+        app.chat_widget
+            .show_context_tree(ThreadId::new(), &graph, labels, descriptions);
         insta::with_settings!({snapshot_path => "../snapshots"}, {
-            insta::assert_snapshot!("context_tree_picker", render_popup(&app, 90));
+            insta::assert_snapshot!("context_tree_view", render_popup(&app, 110));
         });
     }
 
     #[test]
     fn context_status_lists_the_mode_branch_and_recalls() {
+        let entry = |title: &str, reason: &str, presentation: &str, tokens| {
+            codex_app_server_protocol::ContextGraphViewEntry {
+                block_id: format!("blk_{title}"),
+                title: title.to_string(),
+                presentation: presentation.to_string(),
+                reason: reason.to_string(),
+                tokens,
+                note: None,
+            }
+        };
         let views = ContextGraphViewsReadResponse {
             views: vec![codex_app_server_protocol::ContextGraphView {
                 question: "why did the retry test fail".to_string(),
@@ -1179,9 +1713,23 @@ mod tests {
                 tokens: 5_200,
                 budget_tokens: 40_000,
                 latency_ms: 2_350,
+                entries: vec![
+                    entry("add retries with backoff", "task_start", "full", 120),
+                    entry("$ cargo test retry", "selected", "excerpt", 900),
+                    entry("Cap the backoff at 30s", "dependency", "summary", 60),
+                    entry("latest request", "recent", "full", 400),
+                ],
             }],
+            feedback: Some(codex_app_server_protocol::ContextGraphRecallFeedback {
+                expanded: 3,
+                missed: 1,
+                requested: 2,
+            }),
         };
-        let none = ContextGraphViewsReadResponse { views: Vec::new() };
+        let none = ContextGraphViewsReadResponse {
+            views: Vec::new(),
+            feedback: None,
+        };
         let error = "connection closed".to_string();
         let text = [
             context_status(&sample_graph(), Ok(&views)).join("\n"),
@@ -1195,17 +1743,66 @@ mod tests {
     }
 
     #[test]
-    fn merge_arguments_select_the_mode() {
+    fn merge_arguments_select_the_mode_goal_and_code() {
+        let args = |args: &[&str]| args.iter().map(ToString::to_string).collect();
         assert_eq!(
-            merge_args(vec!["--reference".to_string(), "try-sqlite".to_string()]),
-            (
-                vec!["try-sqlite".to_string()],
-                ContextGraphMergeMode::Reference
-            )
+            merge_args(args(&["--reference", "try-sqlite"])),
+            Ok(MergeRequest {
+                names: vec!["try-sqlite".to_string()],
+                mode: ContextGraphMergeMode::Reference,
+                goal: None,
+                code: false,
+            })
+        );
+        let request = MergeRequest {
+            names: vec!["a".to_string(), "b".to_string()],
+            mode: ContextGraphMergeMode::Synthesize,
+            goal: Some("pick a cache".to_string()),
+            code: true,
+        };
+        assert_eq!(
+            merge_args(args(&["a", "-s", "--goal", "pick a cache", "b", "--code"])),
+            Ok(request.clone())
+        );
+        // The picker carries the flags and adds the chosen branches.
+        let mut carried = request.flags();
+        carried.extend(["a".to_string(), "b".to_string()]);
+        assert_eq!(merge_args(carried), Ok(request));
+        assert!(merge_args(args(&["a", "--goal"])).is_err());
+        assert!(merge_args(args(&["a", "--everything"])).is_err());
+    }
+
+    #[test]
+    fn branch_commands_rename_describe_and_archive() {
+        assert_eq!(branch_command(None), Ok(BranchCommand::Show));
+        assert_eq!(branch_command(Some("status")), Ok(BranchCommand::Show));
+        assert_eq!(
+            branch_command(Some("try-sqlite")),
+            Ok(BranchCommand::Rename("try-sqlite".to_string()))
         );
         assert_eq!(
-            merge_args(vec!["try-sqlite".to_string()]),
-            (vec!["try-sqlite".to_string()], ContextGraphMergeMode::Fold)
+            branch_command(Some("rename try-sqlite")),
+            Ok(BranchCommand::Rename("try-sqlite".to_string()))
         );
+        assert_eq!(
+            branch_command(Some("purpose compare SQLite with files")),
+            Ok(BranchCommand::Purpose(Some(
+                "compare SQLite with files".to_string()
+            )))
+        );
+        assert_eq!(
+            branch_command(Some("purpose")),
+            Ok(BranchCommand::Purpose(None))
+        );
+        assert_eq!(
+            branch_command(Some("archive old-try")),
+            Ok(BranchCommand::Archive("old-try".to_string(), true))
+        );
+        assert_eq!(
+            branch_command(Some("unarchive old-try")),
+            Ok(BranchCommand::Archive("old-try".to_string(), false))
+        );
+        assert!(branch_command(Some("archive")).is_err());
+        assert!(branch_command(Some("two words")).is_err());
     }
 }

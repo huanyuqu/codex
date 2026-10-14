@@ -6,6 +6,11 @@ Context mode: auto.
 Branch main of 4 in this conversation.
 Recent recalls:
   7 blocks, about 5200 of 40000 tokens, 2.4s: why did the retry test fail
+What the latest recall chose besides the recent turns:
+  add retries with backoff (task start, full, 120 tokens)
+  $ cargo test retry (selected, excerpt, 900 tokens)
+  Cap the backoff at 30s (dependency, summary, 60 tokens)
+The model read 3 blocks with context_expand; recall had left out 1 of them. You asked for 2 recalls.
 ---
 Context mode: auto.
 Branch main of 4 in this conversation.

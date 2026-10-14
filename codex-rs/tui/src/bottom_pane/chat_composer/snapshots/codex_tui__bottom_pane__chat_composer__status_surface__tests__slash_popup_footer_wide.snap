@@ -7,7 +7,7 @@ Buffer {
     content: [
         "  /model     choose what model and reasoning effort to use                      ",
         "› /memories  configure memory use and generation                                ",
-        "  /merge     merge saved branches into this chat                                ",
+        "  /merge     merge branches or saved chats into this chat                       ",
         "  /mention   mention a file                                                     ",
         "  /mcp       list MCP tools; use /mcp verbose or /mcp login <name>              ",
         "                                                                                ",
@@ -28,7 +28,7 @@ Buffer {
         x: 3, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
         x: 4, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 13, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
-        x: 48, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 57, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 3, y: 3, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
         x: 4, y: 3, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
         x: 13, y: 3, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,

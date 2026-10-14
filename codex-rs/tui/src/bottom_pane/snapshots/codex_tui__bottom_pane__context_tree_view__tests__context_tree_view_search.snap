@@ -1,0 +1,10 @@
+---
+source: tui/src/bottom_pane/context_tree_view_tests.rs
+expression: "render(&view, 100)"
+---
+  Conversation tree
+  1 block matches "jitter"
+
+  › jitter · turn 2 tool      $ cargo test jitter — the jitter tests pass
+
+  Enter or p read · f fork after its turn · / new search · Esc back

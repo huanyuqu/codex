@@ -59,6 +59,9 @@ pub(super) fn server_notification_thread_target(
         ServerNotification::ContextGraphUpdated(notification) => {
             Some(notification.thread_id.as_str())
         }
+        ServerNotification::ContextGraphCardsUpdated(notification) => {
+            Some(notification.thread_id.as_str())
+        }
         ServerNotification::ThreadNameUpdated(notification) => {
             Some(notification.thread_id.as_str())
         }

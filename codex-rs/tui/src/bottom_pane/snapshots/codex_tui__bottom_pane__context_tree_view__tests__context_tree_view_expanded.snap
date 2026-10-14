@@ -1,0 +1,18 @@
+---
+source: tui/src/bottom_pane/context_tree_view_tests.rs
+expression: "render(&view, 100)"
+---
+  Conversation tree
+  Forks are indented under the branch they left.
+
+    ▸ main (current)  3 turns
+    ▾ ├ jitter  1 turn · referenced by main
+          inherits 1 turn from where it forked
+  ›       ▾ 2. try jitter  3 blocks, 1.9k tokens
+              you       try jitter  30 tokens
+              tool      $ cargo test jitter  1.8k tokens
+              answer    jitter works  120 tokens
+    ▸ └ old-try  1 turn · archived
+
+  → expand · ← collapse · Enter switch or read · p read · f fork after turn
+  m merge · r reference · a archive · / search · Esc close

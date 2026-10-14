@@ -635,6 +635,10 @@ pub(crate) struct App {
     temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
     /// Branches forked to work in the background, by thread, with their names.
     background_branches: HashMap<ThreadId, String>,
+    /// Background branches whose turn has not ended yet.
+    running_background_branches: HashSet<ThreadId>,
+    /// What the next `/fork` with this name is for, set by `/fork --purpose`.
+    pending_fork_purpose: Option<(Option<String>, String)>,
     /// Track title generation across thread switches and deduplicate automatic requests.
     pending_thread_titles: HashMap<(ThreadId, ThreadTitleDestination), CancellationToken>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,

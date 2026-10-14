@@ -36,6 +36,7 @@ pub enum SlashCommand {
     Fork,
     Merge,
     Tree,
+    Switch,
     Worktree,
     App,
     Init,
@@ -50,6 +51,7 @@ pub enum SlashCommand {
     Btw,
     Branch,
     Context,
+    Recall,
     Copy,
     Export,
     Raw,
@@ -108,10 +110,14 @@ impl SlashCommand {
             SlashCommand::Delete => "permanently delete this session",
             SlashCommand::Clear => "clear the terminal and start a new chat",
             SlashCommand::Fork => "fork the current chat",
-            SlashCommand::Merge => "merge saved branches into this chat",
-            SlashCommand::Tree => "browse and switch conversation branches",
-            SlashCommand::Branch => "show or rename this chat's branch",
+            SlashCommand::Merge => "merge branches or saved chats into this chat",
+            SlashCommand::Tree => "browse, search and switch conversation branches",
+            SlashCommand::Switch => "switch to another branch of this conversation",
+            SlashCommand::Branch => "show, rename, describe or archive this chat's branch",
             SlashCommand::Context => "show how this chat manages its context, or switch the mode",
+            SlashCommand::Recall => {
+                "rebuild the context by recall, or preview what it would recall"
+            }
             SlashCommand::Worktree => "start or continue a conversation in a new worktree",
             SlashCommand::App => "continue this session in the Desktop app",
             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
@@ -185,8 +191,10 @@ impl SlashCommand {
                 | SlashCommand::Fork
                 | SlashCommand::Merge
                 | SlashCommand::Tree
+                | SlashCommand::Switch
                 | SlashCommand::Branch
                 | SlashCommand::Context
+                | SlashCommand::Recall
                 | SlashCommand::Plan
                 | SlashCommand::Goal
                 | SlashCommand::Voice
@@ -240,6 +248,7 @@ impl SlashCommand {
                 | SlashCommand::Resume
                 | SlashCommand::Agents
                 | SlashCommand::Tree
+                | SlashCommand::Switch
                 | SlashCommand::MultiAgents
                 | SlashCommand::Quit
                 | SlashCommand::Exit
@@ -261,6 +270,7 @@ impl SlashCommand {
             | SlashCommand::Fork
             | SlashCommand::Merge
             | SlashCommand::Tree
+            | SlashCommand::Switch
             | SlashCommand::Worktree
             | SlashCommand::Init
             | SlashCommand::Compact
@@ -316,7 +326,8 @@ impl SlashCommand {
             | SlashCommand::Side
             | SlashCommand::Btw
             | SlashCommand::Branch
-            | SlashCommand::Context => true,
+            | SlashCommand::Context
+            | SlashCommand::Recall => true,
             SlashCommand::Rollout => true,
             SlashCommand::TestApproval => true,
             SlashCommand::Agents | SlashCommand::MultiAgents => true,

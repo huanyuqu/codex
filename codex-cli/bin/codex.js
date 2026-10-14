@@ -246,8 +246,6 @@ delete env.CODEX_MANAGED_BY_BUN;
 delete env.CODEX_MANAGED_BY_PNPM;
 delete env.CODEX_MANAGED_BY_VITE_PLUS;
 env[packageManagerEnvVar] = "1";
-env.CODEX_CONTEXT_MERGE_SCRIPT = path.join(__dirname, "merge-ui.js");
-env.CODEX_CONTEXT_MERGE_NODE = process.execPath;
 if (process.argv[2] === "merge") {
   const { runMergeCommand } = await import("./merge-cli.js");
   process.exit(await runMergeCommand(binaryPath, env, process.argv.slice(3)));

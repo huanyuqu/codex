@@ -320,9 +320,10 @@ impl ChatWidget {
                 self.app_event_tx.send(AppEvent::FoldSideConversation);
             }
             SlashCommand::Merge => self.request_conversation_merge(Vec::new()),
-            SlashCommand::Tree => self.request_context_tree(None),
+            SlashCommand::Tree | SlashCommand::Switch => self.request_context_tree(None),
             SlashCommand::Branch => self.request_context_branch(None),
             SlashCommand::Context => self.request_context_mode(None),
+            SlashCommand::Recall => self.request_context_recall(None),
             SlashCommand::Worktree => {
                 self.show_managed_worktree_picker();
             }
@@ -931,27 +932,52 @@ impl ChatWidget {
             SlashCommand::Context if !trimmed.is_empty() => {
                 self.request_context_mode(Some(trimmed.to_string()));
             }
-            SlashCommand::Fork if trimmed.starts_with("--at") => match parse_fork_at(trimmed) {
-                Ok((turn, name)) => self.app_event_tx.send(AppEvent::ForkAtTurn { turn, name }),
-                Err(usage) => self.add_error_message(usage),
-            },
-            SlashCommand::Fork if trimmed.starts_with("--bg") => {
-                match parse_background_fork(trimmed) {
-                    Ok((name, worktree, prompt)) => {
-                        self.app_event_tx.send(AppEvent::ForkBackgroundBranch {
-                            name,
-                            worktree,
-                            prompt,
-                        });
-                    }
-                    Err(usage) => self.add_error_message(usage),
-                }
+            SlashCommand::Recall if !trimmed.is_empty() => {
+                self.request_context_recall(Some(trimmed.to_string()));
+            }
+            SlashCommand::Switch if !trimmed.is_empty() => {
+                self.request_context_tree(Some(trimmed.to_string()));
             }
             SlashCommand::Fork if !trimmed.is_empty() => {
-                self.show_session_checkout_picker(
-                    ManagedWorktreeMode::Fork,
-                    Some(trimmed.to_string()),
-                );
+                let (rest, purpose) = match take_purpose(trimmed) {
+                    Ok(split) => split,
+                    Err(usage) => {
+                        self.add_error_message(usage);
+                        return;
+                    }
+                };
+                let rest = rest.as_str();
+                if rest.starts_with("--at") {
+                    match parse_fork_at(rest) {
+                        Ok((turn, name)) => self.app_event_tx.send(AppEvent::ForkAtTurn {
+                            turn,
+                            name,
+                            purpose,
+                        }),
+                        Err(usage) => self.add_error_message(usage),
+                    }
+                } else if rest.starts_with("--bg") {
+                    match parse_background_fork(rest) {
+                        Ok((name, worktree, prompt)) => {
+                            self.app_event_tx.send(AppEvent::ForkBackgroundBranch {
+                                name,
+                                worktree,
+                                prompt,
+                                purpose,
+                            });
+                        }
+                        Err(usage) => self.add_error_message(usage),
+                    }
+                } else {
+                    let name = (!rest.is_empty()).then(|| rest.to_string());
+                    if let Some(purpose) = purpose {
+                        self.app_event_tx.send(AppEvent::RememberForkPurpose {
+                            name: name.clone(),
+                            purpose,
+                        });
+                    }
+                    self.show_session_checkout_picker(ManagedWorktreeMode::Fork, name);
+                }
             }
             SlashCommand::Plan if !trimmed.is_empty() => {
                 let plan_available = self.apply_plan_slash_command();
@@ -1370,8 +1396,10 @@ impl ChatWidget {
             | SlashCommand::Fork
             | SlashCommand::Merge
             | SlashCommand::Tree
+            | SlashCommand::Switch
             | SlashCommand::Branch
             | SlashCommand::Context
+            | SlashCommand::Recall
             | SlashCommand::Init
             | SlashCommand::Compact
             | SlashCommand::Review
@@ -1455,6 +1483,17 @@ impl ChatWidget {
             .send(AppEvent::ContextBranch { thread_id, name });
     }
 
+    fn request_context_recall(&mut self, question: Option<String>) {
+        let Some(thread_id) = self.thread_id else {
+            self.add_error_message("Session is still starting; try again in a moment.".into());
+            return;
+        };
+        self.app_event_tx.send(AppEvent::ContextRecall {
+            thread_id,
+            question,
+        });
+    }
+
     fn request_context_mode(&mut self, mode: Option<String>) {
         let Some(thread_id) = self.thread_id else {
             self.add_error_message("Session is still starting; try again in a moment.".into());
@@ -1481,26 +1520,30 @@ impl ChatWidget {
         });
     }
 
-    pub(crate) fn show_context_tree_picker(
+    /// Opens the `/tree` view of `graph`, read for the chat `thread_id`.
+    pub(crate) fn show_context_tree(
         &mut self,
-        items: Vec<SelectionItem>,
-        current: Option<usize>,
+        thread_id: ThreadId,
+        graph: &codex_app_server_protocol::ContextGraphReadResponse,
+        labels: Vec<String>,
+        descriptions: Vec<String>,
     ) {
-        self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: Some("Conversation tree".into()),
-            subtitle: Some(
-                "Forks are indented under the branch they left. Type to search; Enter switches; \
-                 /tree NAME --show previews a branch."
-                    .into(),
-            ),
-            items,
-            is_searchable: true,
-            search_placeholder: Some("Search branch name or ID".into()),
-            initial_selected_idx: current,
-            max_visible_rows: 12,
-            ..Default::default()
-        });
+        let view = crate::bottom_pane::ContextTreeView::new(
+            thread_id,
+            graph,
+            labels,
+            descriptions,
+            self.app_event_tx.clone(),
+        );
+        self.bottom_pane.show_view(Box::new(view));
         self.request_redraw();
+    }
+
+    /// Gives the open `/tree` view the data it asked for.
+    pub(crate) fn update_context_tree(&mut self, update: &crate::bottom_pane::ContextTreeUpdate) {
+        if self.bottom_pane.update_context_tree(update) {
+            self.request_redraw();
+        }
     }
 
     pub(crate) fn set_conversation_merge_status(&mut self, text: Option<String>) {
@@ -1605,6 +1648,37 @@ fn parse_background_fork(args: &str) -> Result<(Option<String>, bool, String), S
     Ok((name, worktree, rest.to_string()))
 }
 
+/// Takes `--purpose TEXT` out of `/fork` arguments. TEXT is one word or a quoted phrase.
+fn take_purpose(args: &str) -> Result<(String, Option<String>), String> {
+    const USAGE: &str = "Usage: /fork ... --purpose \"what the branch is for\"";
+    let Some(start) = args
+        .match_indices("--purpose")
+        .map(|(start, _)| start)
+        .find(|start| *start == 0 || args[..*start].ends_with(char::is_whitespace))
+    else {
+        return Ok((args.trim().to_string(), None));
+    };
+    let after = args[start + "--purpose".len()..].trim_start();
+    let (purpose, rest) = match after.chars().next() {
+        Some(quote @ ('"' | '\'')) => {
+            let body = &after[1..];
+            let end = body.find(quote).ok_or_else(|| USAGE.to_string())?;
+            (&body[..end], &body[end + 1..])
+        }
+        Some(_) => {
+            let end = after.find(char::is_whitespace).unwrap_or(after.len());
+            (&after[..end], &after[end..])
+        }
+        None => return Err(USAGE.to_string()),
+    };
+    let purpose = purpose.trim();
+    if purpose.is_empty() {
+        return Err(USAGE.to_string());
+    }
+    let remaining = format!("{} {}", args[..start].trim(), rest.trim());
+    Ok((remaining.trim().to_string(), Some(purpose.to_string())))
+}
+
 /// Parses `/tree NAME [--show]` into the branch and whether to preview it instead of switching.
 fn tree_args(args: Vec<String>) -> Option<(String, bool)> {
     let mut show = false;
@@ -1668,6 +1742,27 @@ mod background_fork_tests {
         assert_eq!(super::parse_fork_at("--at 2"), Ok((2, None)));
         assert!(super::parse_fork_at("--at 0").is_err());
         assert!(super::parse_fork_at("--at two").is_err());
+    }
+
+    #[test]
+    fn fork_purposes_come_out_of_the_arguments() {
+        assert_eq!(
+            super::take_purpose("try-sqlite --purpose \"compare SQLite\""),
+            Ok(("try-sqlite".to_string(), Some("compare SQLite".to_string())))
+        );
+        assert_eq!(
+            super::take_purpose("--bg --purpose benchmarks run the benchmarks"),
+            Ok((
+                "--bg run the benchmarks".to_string(),
+                Some("benchmarks".to_string())
+            ))
+        );
+        assert_eq!(
+            super::take_purpose("--at 3 x"),
+            Ok(("--at 3 x".to_string(), None))
+        );
+        assert!(super::take_purpose("x --purpose").is_err());
+        assert!(super::take_purpose("x --purpose \"open").is_err());
     }
 
     #[test]

@@ -39,6 +39,14 @@ pub(crate) trait BottomPaneView: Renderable {
         false
     }
 
+    /// Apply data an open `/tree` view asked for. Returns whether this view took it.
+    fn update_context_tree(
+        &mut self,
+        _update: &super::context_tree_view::ContextTreeUpdate,
+    ) -> bool {
+        false
+    }
+
     /// Acknowledge that a queued configuration editor has opened.
     fn config_editor_opened(&mut self) {}
 

@@ -54,9 +54,6 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigRequirementsReadResponse;
 use codex_app_server_protocol::ConfigWriteResponse;
-use codex_app_server_protocol::ContextGraphMergeMode;
-use codex_app_server_protocol::ContextGraphMergeParams;
-use codex_app_server_protocol::ContextGraphMergeResponse;
 use codex_app_server_protocol::ContextGraphReadParams;
 use codex_app_server_protocol::ContextGraphReadResponse;
 use codex_app_server_protocol::GetAccountParams;
@@ -1571,44 +1568,92 @@ impl AppServerSession {
             .wrap_err("contextGraph/read failed in TUI")
     }
 
-    pub(crate) async fn context_graph_merge(
+    pub(crate) async fn context_graph_branch_update(
+        &mut self,
+        params: codex_app_server_protocol::ContextGraphBranchUpdateParams,
+    ) -> Result<()> {
+        let request_id = self.next_request_id();
+        let _: codex_app_server_protocol::ContextGraphBranchUpdateResponse = self
+            .client
+            .request_typed(ClientRequest::ContextGraphBranchUpdate { request_id, params })
+            .await
+            .wrap_err("contextGraph/branch/update failed in TUI")?;
+        Ok(())
+    }
+
+    pub(crate) async fn context_graph_branch_read(
         &mut self,
         thread_id: ThreadId,
         branch: String,
-        mode: ContextGraphMergeMode,
-    ) -> Result<ContextGraphMergeResponse> {
+    ) -> Result<codex_app_server_protocol::ContextGraphBranchReadResponse> {
         let request_id = self.next_request_id();
         self.client
-            .request_typed(ClientRequest::ContextGraphMerge {
+            .request_typed(ClientRequest::ContextGraphBranchRead {
                 request_id,
-                params: ContextGraphMergeParams {
+                params: codex_app_server_protocol::ContextGraphBranchReadParams {
                     thread_id: thread_id.to_string(),
                     branch,
-                    mode,
                 },
             })
             .await
-            .wrap_err("contextGraph/merge failed in TUI")
+            .wrap_err("contextGraph/branch/read failed in TUI")
     }
 
-    pub(crate) async fn context_graph_branch_rename(
+    pub(crate) async fn context_graph_block_read(
         &mut self,
         thread_id: ThreadId,
-        name: String,
-    ) -> Result<()> {
+        block_id: String,
+    ) -> Result<codex_app_server_protocol::ContextGraphBlockReadResponse> {
         let request_id = self.next_request_id();
-        let _: codex_app_server_protocol::ContextGraphBranchRenameResponse = self
-            .client
-            .request_typed(ClientRequest::ContextGraphBranchRename {
+        self.client
+            .request_typed(ClientRequest::ContextGraphBlockRead {
                 request_id,
-                params: codex_app_server_protocol::ContextGraphBranchRenameParams {
+                params: codex_app_server_protocol::ContextGraphBlockReadParams {
                     thread_id: thread_id.to_string(),
-                    name,
+                    block_id,
                 },
             })
             .await
-            .wrap_err("contextGraph/branch/rename failed in TUI")?;
-        Ok(())
+            .wrap_err("contextGraph/block/read failed in TUI")
+    }
+
+    pub(crate) async fn context_graph_search(
+        &mut self,
+        thread_id: ThreadId,
+        query: String,
+    ) -> Result<codex_app_server_protocol::ContextGraphSearchResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ContextGraphSearch {
+                request_id,
+                params: codex_app_server_protocol::ContextGraphSearchParams {
+                    thread_id: thread_id.to_string(),
+                    query,
+                    limit: None,
+                },
+            })
+            .await
+            .wrap_err("contextGraph/search failed in TUI")
+    }
+
+    pub(crate) async fn context_graph_recall(
+        &mut self,
+        thread_id: ThreadId,
+        question: Option<String>,
+        rebuild: bool,
+    ) -> Result<codex_app_server_protocol::ContextGraphRecallResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ContextGraphRecall {
+                request_id,
+                params: codex_app_server_protocol::ContextGraphRecallParams {
+                    thread_id: thread_id.to_string(),
+                    question,
+                    rebuild,
+                },
+            })
+            .await
+            .wrap_err("contextGraph/recall failed in TUI")
     }
 
     pub(crate) async fn context_graph_branch_preview(

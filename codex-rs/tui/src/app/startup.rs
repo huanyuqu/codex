@@ -961,6 +961,8 @@ See the Codex keymap documentation for supported actions and examples."
             background_voice_error: None,
             temporary_structured_requests: HashMap::new(),
             background_branches: HashMap::new(),
+            running_background_branches: HashSet::new(),
+            pending_fork_purpose: None,
             pending_thread_titles: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),

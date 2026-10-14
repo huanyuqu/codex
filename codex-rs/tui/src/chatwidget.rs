@@ -751,6 +751,8 @@ pub(crate) struct ChatWidget {
     context_branch: Option<(ThreadId, Option<String>)>,
     // The thread whose branch name is being read.
     context_branch_pending: Option<ThreadId>,
+    // Background branches forked from this session whose turn has not ended.
+    running_context_branches: usize,
     // Cached git branch name for the status line (None if unknown).
     status_line_branch: Option<String>,
     // CWD used to resolve the cached branch; change resets branch state.

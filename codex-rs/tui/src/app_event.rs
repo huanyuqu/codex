@@ -659,6 +659,7 @@ pub(crate) enum AppEvent {
     ForkAtTurn {
         turn: usize,
         name: Option<String>,
+        purpose: Option<String>,
     },
 
     /// Fold the side conversation on screen into its parent chat and return to it.
@@ -693,6 +694,7 @@ pub(crate) enum AppEvent {
         name: Option<String>,
         worktree: bool,
         prompt: String,
+        purpose: Option<String>,
     },
 
     /// Merge saved branches into the captured current thread. Empty args open a picker.
@@ -705,6 +707,67 @@ pub(crate) enum AppEvent {
     OpenContextTree {
         current_thread_id: ThreadId,
         target: Option<String>,
+    },
+
+    /// Read the turns of branch `branch_id` of `thread_id`'s conversation for the `/tree` view.
+    ContextTreeLoadBranch {
+        thread_id: ThreadId,
+        branch_id: String,
+    },
+
+    /// Search the cards of every branch of `thread_id`'s conversation for the `/tree` view.
+    ContextTreeSearch {
+        thread_id: ThreadId,
+        query: String,
+    },
+
+    /// Show blocks of `thread_id`'s conversation in the pager.
+    ContextTreePreview {
+        thread_id: ThreadId,
+        title: String,
+        block_ids: Vec<String>,
+    },
+
+    /// Fork the chat `source_thread_id` after its turn `turn`, counted from 1, and switch to the
+    /// fork.
+    ContextTreeFork {
+        source_thread_id: ThreadId,
+        turn: usize,
+    },
+
+    /// Change a branch of `thread_id`'s conversation: `branch` names it, or the chat's own
+    /// branch when `None`. With `reopen_tree`, `/tree` opens again afterwards.
+    ContextBranchUpdate {
+        thread_id: ThreadId,
+        branch: Option<String>,
+        name: Option<String>,
+        purpose: Option<String>,
+        archived: Option<bool>,
+        reopen_tree: bool,
+    },
+
+    /// Rebuild the history by recall before the next turn, or with `question`, show what recall
+    /// would choose for it.
+    ContextRecall {
+        thread_id: ThreadId,
+        question: Option<String>,
+    },
+
+    /// A merge that ran in the background finished.
+    ContextGraphMergeDone {
+        mode: codex_app_server_protocol::ContextGraphMergeMode,
+        result: Result<codex_app_server_protocol::ContextGraphMergeResponse, String>,
+    },
+
+    /// A recall preview that ran in the background finished.
+    ContextRecallDone {
+        result: Result<codex_app_server_protocol::ContextGraphRecallResponse, String>,
+    },
+
+    /// Remember what the next `/fork` named `name` is for, so its branch gets that purpose.
+    RememberForkPurpose {
+        name: Option<String>,
+        purpose: String,
     },
 
     /// Switch to a selected context branch if the originating chat is still current and idle.

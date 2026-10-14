@@ -42,64 +42,82 @@ async fn slash_tree_rejects_starting_busy_side_and_invalid_arguments() {
     }
 }
 
-#[tokio::test]
-async fn slash_tree_picker_marks_current_searches_and_switches_without_creating_a_turn() {
-    for search in [false, true] {
-        let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
-        let current = ThreadId::new();
-        let branch = ThreadId::new();
-        chat.thread_id = Some(current);
-        let items = [(branch, "Branch B"), (current, "Merged A B C")]
-            .into_iter()
-            .map(|(target_thread_id, name)| SelectionItem {
-                name: name.into(),
-                search_value: Some(name.into()),
-                is_current: target_thread_id == current,
-                actions: vec![Box::new(move |tx| {
-                    tx.send(AppEvent::SwitchContextBranch {
-                        current_thread_id: current,
-                        target_thread_id,
-                    })
-                })],
-                dismiss_on_select: true,
-                ..Default::default()
-            })
-            .collect();
-        chat.show_context_tree_picker(items, Some(1));
-        if search {
-            for c in "Branch B".chars() {
-                chat.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-            }
+fn two_branch_graph(
+    current: ThreadId,
+    branch: ThreadId,
+) -> codex_app_server_protocol::ContextGraphReadResponse {
+    let row = |id: &str, name: &str, thread_id: ThreadId, depth, is_current| {
+        codex_app_server_protocol::ContextGraphBranch {
+            branch_id: id.to_string(),
+            name: name.to_string(),
+            thread_id: Some(thread_id.to_string()),
+            parent_branch_id: (depth > 0).then(|| "b1".to_string()),
+            depth,
+            status: codex_app_server_protocol::ContextGraphBranchStatus::Active,
+            turns: 1,
+            last_request: None,
+            summary: None,
+            purpose: None,
+            current: is_current,
         }
-        chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        let mut selected = None;
-        while let Ok(event) = rx.try_recv() {
-            if let AppEvent::SwitchContextBranch {
-                current_thread_id,
-                target_thread_id,
-            } = event
-            {
-                assert_eq!(current_thread_id, current);
-                selected = Some(target_thread_id);
-            }
-        }
-        assert_eq!(selected, Some(if search { branch } else { current }));
-        assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    };
+    codex_app_server_protocol::ContextGraphReadResponse {
+        graph_id: Some("graph".to_string()),
+        branches: vec![
+            row("b1", "main", current, 0, true),
+            row("b2", "try-b", branch, 1, false),
+        ],
+        merges: Vec::new(),
+        mode: None,
     }
 }
 
 #[tokio::test]
-async fn slash_tree_picker_cancel_keeps_current_chat() {
+async fn slash_tree_view_switches_and_expands_without_creating_a_turn() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let current = ThreadId::new();
+    let branch = ThreadId::new();
+    chat.thread_id = Some(current);
+    let graph = two_branch_graph(current, branch);
+    chat.show_context_tree(
+        current,
+        &graph,
+        vec!["main".into(), "└ try-b".into()],
+        vec!["1 turn".into(), "1 turn".into()],
+    );
+    // The view opens on the current branch; the fork is one row down.
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ContextTreeLoadBranch { thread_id, branch_id })
+        if thread_id == current && branch_id == "b2");
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let mut selected = None;
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::SwitchContextBranch {
+            current_thread_id,
+            target_thread_id,
+        } = event
+        {
+            assert_eq!(current_thread_id, current);
+            selected = Some(target_thread_id);
+        }
+    }
+    assert_eq!(selected, Some(branch));
+    assert!(chat.bottom_pane.no_modal_or_popup_active());
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn slash_tree_view_cancel_keeps_current_chat() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
     let current = ThreadId::new();
     chat.thread_id = Some(current);
-    chat.show_context_tree_picker(
-        vec![SelectionItem {
-            name: "A".into(),
-            is_current: true,
-            ..Default::default()
-        }],
-        Some(0),
+    let graph = two_branch_graph(current, ThreadId::new());
+    chat.show_context_tree(
+        current,
+        &graph,
+        vec!["main".into(), "└ try-b".into()],
+        vec![String::new(), String::new()],
     );
     chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(chat.bottom_pane.no_modal_or_popup_active());
@@ -108,6 +126,46 @@ async fn slash_tree_picker_cancel_keeps_current_chat() {
     }
     assert_eq!(chat.thread_id, Some(current));
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn slash_switch_and_recall_capture_the_current_thread() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let current = ThreadId::new();
+    chat.thread_id = Some(current);
+    chat.dispatch_command_with_args(SlashCommand::Switch, "try-b".into(), Vec::new());
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenContextTree { current_thread_id, target: Some(target) })
+        if current_thread_id == current && target == "try-b");
+    chat.dispatch_command(SlashCommand::Recall);
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ContextRecall { thread_id, question: None })
+        if thread_id == current);
+    chat.dispatch_command_with_args(
+        SlashCommand::Recall,
+        "what did we decide".into(),
+        Vec::new(),
+    );
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ContextRecall { thread_id, question: Some(question) })
+        if thread_id == current && question == "what did we decide");
+}
+
+#[tokio::test]
+async fn slash_fork_purpose_reaches_every_kind_of_fork() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.dispatch_command_with_args(
+        SlashCommand::Fork,
+        "--at 2 try-b --purpose \"compare caches\"".into(),
+        Vec::new(),
+    );
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ForkAtTurn { turn: 2, name: Some(name), purpose: Some(purpose) })
+        if name == "try-b" && purpose == "compare caches");
+    chat.dispatch_command_with_args(
+        SlashCommand::Fork,
+        "--purpose bench --bg run the benchmarks".into(),
+        Vec::new(),
+    );
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ForkBackgroundBranch { prompt, purpose: Some(purpose), .. })
+        if prompt == "run the benchmarks" && purpose == "bench");
 }
 
 #[tokio::test]

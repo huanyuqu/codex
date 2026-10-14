@@ -1,0 +1,15 @@
+---
+source: tui/src/app/context_graph_branches.rs
+expression: "render_popup(&app, 110)"
+---
+
+  Conversation tree
+  Forks are indented under the branch they left.
+
+  › ▸ main (current)  4 turns · HTTP client retries · last: request of main
+    ▸ ├ try-sqlite  working in the background · 2 turns · last: request of try-sqlite · referenced by main
+    ▸ │ └ deeper  1 turn · last: request of deeper
+    ▸ └ old-try  1 turn · last: request of old-try · rolled back
+
+  → expand · ← collapse · Enter switch or read · p read · f fork after turn
+  m merge · r reference · a archive · / search · Esc close

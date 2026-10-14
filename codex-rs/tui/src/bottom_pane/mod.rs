@@ -79,6 +79,7 @@ mod apply_patch_header;
 mod approval_overlay;
 mod async_questions;
 mod config_panel;
+mod context_tree_view;
 mod empty_state_policy;
 mod hook_status;
 mod mcp_server_elicitation;
@@ -166,6 +167,8 @@ mod selection_picker_layout;
 mod skill_popup;
 mod skills_toggle_view;
 pub(crate) mod slash_commands;
+pub(crate) use context_tree_view::ContextTreeUpdate;
+pub(crate) use context_tree_view::ContextTreeView;
 pub(crate) use footer::CollaborationModeIndicator;
 pub(crate) use footer::GoalStatusIndicator;
 #[cfg(test)]
@@ -1581,6 +1584,18 @@ impl BottomPane {
             self.view_stack[index] = view;
             self.request_redraw();
         }
+    }
+
+    /// Gives an open `/tree` view the data it asked for. Returns whether a view took it.
+    pub(crate) fn update_context_tree(&mut self, update: &ContextTreeUpdate) -> bool {
+        let mut updated = false;
+        for view in &mut self.view_stack {
+            updated |= view.update_context_tree(update);
+        }
+        if updated {
+            self.request_redraw();
+        }
+        updated
     }
 
     pub(crate) fn list_keymap(&self) -> crate::keymap::ListKeymap {

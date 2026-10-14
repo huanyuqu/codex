@@ -224,6 +224,14 @@ impl ChatWidget {
         self.refresh_status_surfaces();
     }
 
+    /// Counts the background branches still working, for the status line.
+    pub(crate) fn set_running_context_branches(&mut self, running: usize) {
+        if self.running_context_branches != running {
+            self.running_context_branches = running;
+            self.refresh_status_surfaces();
+        }
+    }
+
     /// Looks the branch name up again, after the graph changed.
     pub(crate) fn invalidate_context_branch_name(&mut self) {
         if self.context_branch.take().is_some() {
@@ -899,12 +907,20 @@ impl ChatWidget {
                 .as_deref()
                 .and_then(normalize_thread_name)
                 .or_else(|| self.thread_id.map(|id| id.to_string())),
-            StatusLineItem::ContextBranch => self
-                .context_branch
-                .as_ref()
-                .filter(|(thread_id, _)| Some(*thread_id) == self.thread_id)
-                .and_then(|(_, name)| name.as_ref())
-                .map(|name| format!("branch {name}")),
+            StatusLineItem::ContextBranch => {
+                let name = self
+                    .context_branch
+                    .as_ref()
+                    .filter(|(thread_id, _)| Some(*thread_id) == self.thread_id)
+                    .and_then(|(_, name)| name.as_ref());
+                match (name, self.running_context_branches) {
+                    (Some(name), 0) => Some(format!("branch {name}")),
+                    (Some(name), running) => Some(format!("branch {name} · {running} running")),
+                    (None, 0) => None,
+                    (None, 1) => Some("1 branch running".to_string()),
+                    (None, running) => Some(format!("{running} branches running")),
+                }
+            }
             StatusLineItem::WorkspaceHeadline => self.status_line_workspace_headline.clone(),
             StatusLineItem::TaskProgress => self.terminal_title_task_progress(),
         }
