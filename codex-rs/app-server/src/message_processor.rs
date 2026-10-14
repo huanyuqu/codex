@@ -1702,6 +1702,11 @@ impl MessageProcessor {
                     .context_graph_request(&request_id, ContextGraphRequest::Recall(params))
                     .await
             }
+            ClientRequest::ContextGraphPrefetch { params, .. } => {
+                self.turn_processor
+                    .context_graph_request(&request_id, ContextGraphRequest::Prefetch(params))
+                    .await
+            }
             ClientRequest::ContextGraphBranchPreview { params, .. } => {
                 self.turn_processor
                     .context_graph_request(&request_id, ContextGraphRequest::BranchPreview(params))

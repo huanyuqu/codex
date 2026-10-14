@@ -773,6 +773,12 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ContextGraphRecallResponse,
     },
+    #[experimental("contextGraph/prefetch")]
+    ContextGraphPrefetch => "contextGraph/prefetch" {
+        params: v2::ContextGraphPrefetchParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ContextGraphPrefetchResponse,
+    },
     #[experimental("contextGraph/branch/preview")]
     ContextGraphBranchPreview => "contextGraph/branch/preview" {
         params: v2::ContextGraphBranchPreviewParams,

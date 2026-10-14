@@ -356,9 +356,10 @@ pub struct ContextGraphView {
     pub entries: Vec<ContextGraphViewEntry>,
     /// How the view reached the context window: "waited" when the turn waited for it,
     /// "speculative" when it was made as the previous turn ended, "earlier" when it was made for
-    /// the previous request, "deferred" when it joined the turn between model requests, or
-    /// "lexical" when lexical search alone chose while the recall ran. Unset for previews and
-    /// for recalls the model asked for.
+    /// the previous request, "deferred" when it joined the turn between model requests,
+    /// "lexical" when lexical search alone chose while the recall ran, or "draft" when it was
+    /// made for a draft of the request while the user wrote it. Unset for previews and for
+    /// recalls the model asked for.
     #[serde(default)]
     pub delivery: Option<String>,
     /// How long the turn waited for the recall, in milliseconds, when it reached the window.
@@ -415,6 +416,26 @@ pub struct ContextGraphRecallParams {
 pub struct ContextGraphRecallResponse {
     /// The view recall built for `question`, if one was given.
     pub view: Option<ContextGraphView>,
+}
+
+/// A draft of the thread's next request, as the user writes it: recall starts choosing context
+/// for it in the background, so the turn it starts need not wait. Clients send it when the user
+/// pauses typing.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ContextGraphPrefetchParams {
+    pub thread_id: String,
+    pub text: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ContextGraphPrefetchResponse {
+    /// Whether a recall started. None does when the thread's next turn would not recall, the
+    /// draft is short, or a recall for the same draft already runs.
+    pub started: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

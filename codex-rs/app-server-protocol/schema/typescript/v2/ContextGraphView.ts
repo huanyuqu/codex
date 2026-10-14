@@ -27,9 +27,10 @@ entries: Array<ContextGraphViewEntry>,
 /**
  * How the view reached the context window: "waited" when the turn waited for it,
  * "speculative" when it was made as the previous turn ended, "earlier" when it was made for
- * the previous request, "deferred" when it joined the turn between model requests, or
- * "lexical" when lexical search alone chose while the recall ran. Unset for previews and
- * for recalls the model asked for.
+ * the previous request, "deferred" when it joined the turn between model requests,
+ * "lexical" when lexical search alone chose while the recall ran, or "draft" when it was
+ * made for a draft of the request while the user wrote it. Unset for previews and for
+ * recalls the model asked for.
  */
 delivery: string | null,
 /**

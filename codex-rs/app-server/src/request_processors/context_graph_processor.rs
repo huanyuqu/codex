@@ -21,6 +21,8 @@ use codex_app_server_protocol::ContextGraphMergedBranch;
 use codex_app_server_protocol::ContextGraphMode;
 use codex_app_server_protocol::ContextGraphModeSetParams;
 use codex_app_server_protocol::ContextGraphModeSetResponse;
+use codex_app_server_protocol::ContextGraphPrefetchParams;
+use codex_app_server_protocol::ContextGraphPrefetchResponse;
 use codex_app_server_protocol::ContextGraphReadParams;
 use codex_app_server_protocol::ContextGraphReadResponse;
 use codex_app_server_protocol::ContextGraphRecallFeedback;
@@ -113,6 +115,7 @@ pub(crate) enum ContextGraphRequest {
     BlockRead(ContextGraphBlockReadParams),
     Search(ContextGraphSearchParams),
     Recall(ContextGraphRecallParams),
+    Prefetch(ContextGraphPrefetchParams),
     BranchPreview(ContextGraphBranchPreviewParams),
     ModeSet(ContextGraphModeSetParams),
     ViewsRead(ContextGraphViewsReadParams),
@@ -144,6 +147,7 @@ impl TurnRequestProcessor {
             }
             ContextGraphRequest::Search(params) => Box::pin(self.context_graph_search(params)),
             ContextGraphRequest::Recall(params) => Box::pin(self.context_graph_recall(params)),
+            ContextGraphRequest::Prefetch(params) => Box::pin(self.context_graph_prefetch(params)),
             ContextGraphRequest::BranchPreview(params) => {
                 Box::pin(self.context_graph_branch_preview(params))
             }
@@ -476,6 +480,15 @@ impl TurnRequestProcessor {
             })
             .collect();
         Ok(Some(ContextGraphSearchResponse { hits }.into()))
+    }
+
+    async fn context_graph_prefetch(
+        &self,
+        params: ContextGraphPrefetchParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let (_, thread) = self.load_thread(&params.thread_id).await?;
+        let started = thread.prefetch_context_recall(&params.text).await;
+        Ok(Some(ContextGraphPrefetchResponse { started }.into()))
     }
 
     async fn context_graph_recall(

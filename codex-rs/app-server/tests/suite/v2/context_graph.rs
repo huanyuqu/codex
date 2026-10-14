@@ -20,6 +20,8 @@ use codex_app_server_protocol::ContextGraphMergeResponse;
 use codex_app_server_protocol::ContextGraphMode;
 use codex_app_server_protocol::ContextGraphModeSetParams;
 use codex_app_server_protocol::ContextGraphModeSetResponse;
+use codex_app_server_protocol::ContextGraphPrefetchParams;
+use codex_app_server_protocol::ContextGraphPrefetchResponse;
 use codex_app_server_protocol::ContextGraphReadParams;
 use codex_app_server_protocol::ContextGraphReadResponse;
 use codex_app_server_protocol::ContextGraphRecallFeedback;
@@ -464,5 +466,69 @@ async fn context_graph_requests_report_unknown_branches() -> Result<()> {
     let graph = read_graph(&mut server, "019a0000-0000-7000-8000-000000000000").await?;
     assert_eq!(graph.graph_id, None);
     assert!(graph.branches.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn drafts_are_recalled_for_only_when_the_next_turn_recalls() -> Result<()> {
+    let mock = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&mock.uri())
+        .enable_feature(Feature::ContextGraph)
+        .write(codex_home.path())?;
+    let mut server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+    let start = server
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadStartResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, server.read_response(start)).await??;
+    run_turn(&mut server, &thread.id, "add retries to the client").await?;
+    let prefetch = |text: &str| ContextGraphPrefetchParams {
+        thread_id: thread.id.clone(),
+        text: text.to_string(),
+    };
+
+    // A short history in auto mode is kept whole, so nothing is recalled ahead of the request.
+    let response: ContextGraphPrefetchResponse = request(
+        &mut server,
+        "contextGraph/prefetch",
+        prefetch("now cap the backoff at thirty seconds"),
+    )
+    .await?;
+    assert_eq!(response, ContextGraphPrefetchResponse { started: false });
+
+    let _: ContextGraphModeSetResponse = request(
+        &mut server,
+        "contextGraph/mode/set",
+        ContextGraphModeSetParams {
+            thread_id: thread.id.clone(),
+            mode: ContextGraphMode::Recall,
+        },
+    )
+    .await?;
+    run_turn(&mut server, &thread.id, "and add jitter").await?;
+    let response: ContextGraphPrefetchResponse = request(
+        &mut server,
+        "contextGraph/prefetch",
+        prefetch("now cap the backoff at thirty seconds"),
+    )
+    .await?;
+    assert_eq!(response, ContextGraphPrefetchResponse { started: true });
+    // The same draft again is already being recalled for, and a short one is not worth it.
+    for text in ["now cap the backoff at thirty seconds", "cap it"] {
+        let response: ContextGraphPrefetchResponse =
+            request(&mut server, "contextGraph/prefetch", prefetch(text)).await?;
+        assert_eq!(
+            response,
+            ContextGraphPrefetchResponse { started: false },
+            "{text}"
+        );
+    }
     Ok(())
 }
