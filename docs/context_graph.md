@@ -131,15 +131,33 @@ The `mode` setting decides how a chat manages the history its model sees.
 | Mode | Behavior |
 | --- | --- |
 | `full` | The whole history, compacted into a summary when the context window fills up. This is Codex's normal behavior. |
-| `auto` | The whole history until it fills `soft_limit_percent` of the context window, then a recalled history instead of a summary. |
+| `auto` | The default. The whole history until it fills `soft_limit_percent` of the context window, then a recalled history instead of a summary. |
 | `recall` | A recalled history before every turn. Meant for experiments. |
 
 A recalled history keeps the most recent turns and the first request in full,
 lists the user's constraints and the decisions still in force, has one line per
 earlier turn, and adds the earlier blocks a screening model picked for the
-current request, in full, as excerpts, or as summaries. `/compact` recalls
-instead of summarizing when `mode` is not `full`. If recall fails, Codex falls
-back to summary compaction.
+current request, in full, as excerpts, or as summaries. Blocks whose cards
+match the request's words, files or symbols but that the screening did not pick
+are added as summaries, within `lexical_share_percent` of the budget, so a
+block the screening missed is still in view; they are the first to go when the
+history is over budget. `/compact` recalls instead of summarizing when `mode`
+is not `full`. If recall fails, Codex falls back to summary compaction.
+
+A turn does not wait long for recall:
+
+- When a turn ends and the next one would recall, recall runs in the
+  background for it, reading the turn's request and answer.
+- When the next request comes, that recall is used as it is if it already shows
+  the blocks lexical search ranks highest for the request; a request with
+  nothing to match, such as "go on", is served by it too.
+- Otherwise the turn waits up to `recall_wait_ms` for the recall of its
+  request. If that takes longer, the turn goes on with the earlier recall, or
+  with summaries of the blocks lexical search ranks highest, and the late
+  recall adds what it picked before a later model request of the turn.
+
+When the history has to shrink at once, because the context window is full or
+you ran `/compact`, recall is waited for.
 
 The model also gets three tools: `context_search` finds blocks of the whole
 history by words, `context_expand` reads a block or a whole turn in full, and
@@ -185,6 +203,9 @@ recent_turns = 2
 soft_limit_percent = 50
 on_branch_complete = "notify"   # notify | fold, for /fork --bg
 recall_timeout_secs = 120       # give up on recall and fall back after this long
+recall_wait_ms = 3000           # longest a turn waits for the recall of its request
+speculative_recall = true       # recall for the next turn when a turn ends
+lexical_share_percent = 15      # budget share for unpicked lexical matches; 0 adds none
 rebuild_overlap_percent = 50    # rebuild the recalled history when less of it still fits
 edit_creates_branch = true      # editing an earlier prompt forks instead of rewinding
 escalate_model = "gpt-6.1-sol"  # screens again when the first screening is unsure

@@ -9,6 +9,7 @@ mod merge;
 mod model;
 mod recall;
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -53,7 +54,9 @@ pub(crate) use merge::MergeOptions;
 pub(crate) use merge::PreparedMerge;
 pub(crate) use model::SessionShadowModel;
 pub(crate) use recall::RecallTrigger;
+pub(crate) use recall::add_finished_recall;
 pub(crate) use recall::recall_into_history;
+pub(crate) use recall::speculate_recall;
 
 /// The agent that spawned a thread without giving it the conversation's history.
 #[derive(Debug, Clone)]
@@ -227,6 +230,7 @@ pub(crate) async fn start(
         recalled_references: StdMutex::new(None),
         window: StdMutex::new(None),
         rebuild_requested: AtomicBool::new(false),
+        job: StdMutex::new(None),
     }));
     start
 }
@@ -289,21 +293,35 @@ pub(crate) struct ContextGraphService {
     window: StdMutex<Option<RecalledWindow>>,
     /// Whether the user asked to rebuild the history by recall before the next turn.
     rebuild_requested: AtomicBool,
+    /// The latest recall run in the background: of a turn's request, when the turn went on
+    /// without it, or of the turn that just ended, for the next one.
+    job: StdMutex<Option<recall::RecallJob>>,
 }
 
 /// The blocks a recalled context window holds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RecalledWindow {
-    /// Blocks the recalled view showed, and blocks recall added to the window since.
-    pub(crate) shown: HashSet<BlockId>,
+    /// Blocks the recalled view showed, and blocks recall added to the window since, with how
+    /// much of each, as a [`Presentation::detail`].
+    ///
+    /// [`Presentation::detail`]: codex_context_graph::view::Presentation::detail
+    pub(crate) shown: HashMap<BlockId, u8>,
     /// The branch's own blocks when the view was built; own blocks recorded after it are in the
     /// window as they were appended.
     pub(crate) known: HashSet<BlockId>,
 }
 
 impl RecalledWindow {
-    pub(crate) fn holds(&self, id: &BlockId, own: bool) -> bool {
-        self.shown.contains(id) || (own && !self.known.contains(id))
+    /// Whether the window shows the block `id` with at least `detail`.
+    pub(crate) fn holds(&self, id: &BlockId, own: bool, detail: u8) -> bool {
+        self.shown.get(id).is_some_and(|shown| *shown >= detail)
+            || (own && !self.known.contains(id))
+    }
+
+    /// Records that the window now shows `id` with `detail`.
+    pub(crate) fn show(&mut self, id: BlockId, detail: u8) {
+        let shown = self.shown.entry(id).or_default();
+        *shown = (*shown).max(detail);
     }
 }
 

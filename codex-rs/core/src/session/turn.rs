@@ -601,6 +601,14 @@ pub(crate) async fn run_turn(
             sess.record_reasoning_effort_override(step_context.as_ref())
                 .await;
 
+            // A recall of this turn's request that ended after the turn went on adds what it
+            // picked before the next model request.
+            Box::pin(crate::context_graph::add_finished_recall(
+                &sess,
+                &step_context,
+            ))
+            .await;
+
             // Construct the input that we will send to the model.
             let sampling_request_input: Vec<ResponseItem> = async {
                 sess.clone_history()
@@ -873,6 +881,13 @@ pub(crate) async fn run_turn(
                             warn!(error = %err, "Post-turn compaction failed; preserving the completed turn");
                         }
                     }
+                    // Recall for the next turn while the user reads this one.
+                    Box::pin(crate::context_graph::speculate_recall(
+                        &sess,
+                        &step_context,
+                        last_agent_message.as_deref(),
+                    ))
+                    .await;
                     break;
                 }
                 continue;

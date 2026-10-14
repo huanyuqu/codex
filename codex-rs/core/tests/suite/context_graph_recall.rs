@@ -7,13 +7,20 @@ use codex_features::Feature;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
+use std::time::Duration;
+
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
+use core_test_support::responses::mount_response_once_match;
+use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::skip_if_sandbox;
+use core_test_support::skip_if_target_windows;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
@@ -76,6 +83,7 @@ async fn recall_mode_rebuilds_the_history_before_a_turn() -> Result<()> {
         config.context_graph.recent_turns = 1;
         config.context_graph.screen_model = Some("gpt-5.2".to_string());
         config.context_graph.read_model = Some("none".to_string());
+        config.context_graph.speculative_recall = false;
     });
     let test = builder.build(&server).await?;
     turn(&test.codex, FIRST_REQUEST).await?;
@@ -180,5 +188,239 @@ async fn context_expand_reads_a_turn_of_the_history() -> Result<()> {
         output.contains("(turn 1, user_message)") && output.contains(FIRST_REQUEST),
         "missing expanded turn: {output}"
     );
+    Ok(())
+}
+
+/// The start of the screening model's instructions, which only screening requests carry.
+const SCREENING: &str = "You choose the context a coding agent gets";
+const RECALLED_NOTE: &str = "Recalled from earlier in this conversation";
+const THIRD_REQUEST: &str = "Why were the retries added?";
+
+/// A matcher on the text of a request body.
+fn body(
+    contains: &'static [&'static str],
+    lacks: &'static [&'static str],
+) -> impl Fn(&wiremock::Request) -> bool + Send + Sync + 'static {
+    move |request: &wiremock::Request| {
+        let text = String::from_utf8_lossy(&request.body);
+        contains.iter().all(|needle| text.contains(needle))
+            && lacks.iter().all(|needle| !text.contains(needle))
+    }
+}
+
+/// The bodies of the model requests the server received, in order.
+async fn request_bodies(server: &wiremock::MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|request| request.url.path().ends_with("/responses"))
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .collect()
+}
+
+fn answer(id: &str, text: &str) -> String {
+    sse(vec![ev_assistant_message(id, text), ev_completed(id)])
+}
+
+fn screening_answer(id: &str, selected: &[&str]) -> String {
+    let selected: Vec<_> = selected
+        .iter()
+        .map(|card| json!({ "card": card, "detail": "full", "reason": "needed" }))
+        .collect();
+    answer(
+        id,
+        &json!({ "selected": selected, "uncertain": [] }).to_string(),
+    )
+}
+
+fn recalling(config: &mut codex_core::config::Config) {
+    config
+        .features
+        .enable(Feature::ContextGraph)
+        .unwrap_or_else(|err| panic!("enable context_graph: {err}"));
+    config.context_graph.mode = ContextMode::Recall;
+    config.context_graph.recent_turns = 1;
+    config.context_graph.screen_model = Some("gpt-5.2".to_string());
+    config.context_graph.read_model = Some("none".to_string());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_recall_joins_the_turn_between_model_requests() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    skip_if_target_windows!(Ok(()), "uses a POSIX shell command");
+    let server = start_mock_server().await;
+    mount_sse_once_match(
+        &server,
+        body(
+            &[FIRST_REQUEST],
+            &[SCREENING, SECOND_REQUEST, THIRD_REQUEST],
+        ),
+        answer("m1", "Retries added."),
+    )
+    .await;
+    // The second turn's recall answers at once and rebuilds the history.
+    mount_sse_once_match(
+        &server,
+        body(&[SCREENING, SECOND_REQUEST], &[]),
+        screening_answer("s2", &[]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        body(&[SECOND_REQUEST], &[SCREENING, THIRD_REQUEST]),
+        answer("m2", "Timeout added."),
+    )
+    .await;
+    // The third turn's recall takes longer than the turn waits.
+    mount_response_once_match(
+        &server,
+        body(&[SCREENING, THIRD_REQUEST], &[]),
+        sse_response(screening_answer(
+            "s3",
+            &["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"],
+        ))
+        .set_delay(Duration::from_millis(1_500)),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        body(&[THIRD_REQUEST], &[SCREENING, "wait-1"]),
+        sse(vec![
+            ev_function_call(
+                "wait-1",
+                "exec_command",
+                &json!({ "cmd": "sleep 2", "yield_time_ms": 10_000 }).to_string(),
+            ),
+            ev_completed("m3"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        body(&[THIRD_REQUEST, "wait-1"], &[SCREENING]),
+        answer("m4", "They make the client survive flaky networks."),
+    )
+    .await;
+
+    let mut builder = test_codex().with_model("gpt-5.2").with_config(|config| {
+        recalling(config);
+        config.context_graph.speculative_recall = false;
+        config.context_graph.recall_wait_ms = 300;
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    turn(&test.codex, FIRST_REQUEST).await?;
+    turn(&test.codex, SECOND_REQUEST).await?;
+    turn(&test.codex, THIRD_REQUEST).await?;
+
+    let bodies = request_bodies(&server).await;
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| body.contains(SCREENING) && body.contains(THIRD_REQUEST))
+            .count(),
+        1
+    );
+    let third: Vec<&String> = bodies
+        .iter()
+        .filter(|body| body.contains(THIRD_REQUEST) && !body.contains(SCREENING))
+        .collect();
+    assert_eq!(third.len(), 2);
+    // The first model request went out without the late recall, with summaries of the best
+    // lexical matches standing in; the late recall joined before the second.
+    let notes = |body: &str| body.matches(RECALLED_NOTE).count();
+    assert_eq!(notes(third[0]), 1, "the lexical stand-ins were not added");
+    assert_eq!(notes(third[1]), 2, "the late recall was not added");
+    assert!(
+        third[1].contains("Retries added."),
+        "missing the recalled answer"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_next_turn_starts_from_the_recall_made_when_a_turn_ends() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    mount_sse_once_match(
+        &server,
+        body(&[FIRST_REQUEST], &[SCREENING, "Go on."]),
+        answer("m1", "Retries added."),
+    )
+    .await;
+    // Recall for the next turn reads the ended turn's request and answer.
+    mount_sse_once_match(
+        &server,
+        body(&[SCREENING, FIRST_REQUEST, "Retries added."], &[]),
+        screening_answer("s1", &["C1"]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        body(&["Go on."], &[SCREENING]),
+        answer("m2", "Going on."),
+    )
+    .await;
+
+    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    provider.base_url = Some(format!("{}/v1", server.uri()));
+    provider.supports_websockets = false;
+    let mut builder = test_codex().with_config(move |config| {
+        config.model = Some("gpt-5.2".to_string());
+        config.model_provider = provider;
+        recalling(config);
+    });
+    let test = builder.build(&server).await?;
+    turn(&test.codex, FIRST_REQUEST).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !request_bodies(&server)
+        .await
+        .iter()
+        .any(|body| body.contains(SCREENING))
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Let the recall read the answer.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Go on.".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let recalled = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ContextViewRecalled(_))
+    })
+    .await;
+    let EventMsg::ContextViewRecalled(recalled) = recalled else {
+        unreachable!("waited for a recalled view");
+    };
+    assert!(recalled.rebuilt);
+    assert_eq!(recalled.question, "Go on.");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let bodies = request_bodies(&server).await;
+    // The request names nothing the earlier recall misses, so it was not screened again: the
+    // only screening before its answer is the one made when the first turn ended.
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| body.contains(SCREENING) && !body.contains("Going on."))
+            .count(),
+        1
+    );
+    let next: Vec<&String> = bodies
+        .iter()
+        .filter(|body| body.contains("Go on.") && !body.contains(SCREENING))
+        .collect();
+    assert_eq!(next.len(), 1);
+    assert!(next[0].contains(RECALL_NOTICE), "missing recall notice");
     Ok(())
 }

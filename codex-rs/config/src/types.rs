@@ -359,10 +359,10 @@ pub struct MemoriesToml {
 #[serde(rename_all = "lowercase")]
 pub enum ContextMode {
     /// Keep the whole history and compact it with summaries when the context window fills up.
-    #[default]
     Full,
     /// Keep the whole history until it reaches the soft limit, then rebuild it by recall
     /// instead of compacting it.
+    #[default]
     Auto,
     /// Rebuild the history by recall before every turn.
     Recall,
@@ -430,9 +430,19 @@ pub struct ContextGraphToml {
     pub soft_limit_percent: Option<u8>,
     /// What happens when a branch forked with `/fork --bg` finishes its turn.
     pub on_branch_complete: Option<BranchCompletion>,
-    /// Longest a recall may take before the turn goes on without it, in seconds.
+    /// Longest a recall may take before it is given up, in seconds.
     #[schemars(range(min = 1))]
     pub recall_timeout_secs: Option<u64>,
+    /// Longest a turn waits for the recall of its request before it goes on, in milliseconds.
+    /// A recall that finishes later is added before a later model request of the turn.
+    pub recall_wait_ms: Option<u64>,
+    /// Whether recall runs in the background when a turn ends, so the next turn can start from
+    /// its result instead of waiting.
+    pub speculative_recall: Option<bool>,
+    /// Share of the recall budget, in percent, for summaries of blocks that match the request's
+    /// words but that the screening did not pick. 0 adds none.
+    #[schemars(range(min = 0, max = 50))]
+    pub lexical_share_percent: Option<u8>,
     /// In `recall` mode, the share of the blocks a request needs, in percent, that must already
     /// be in the context for recall to add the missing ones instead of rebuilding the context.
     #[schemars(range(min = 0, max = 100))]
@@ -459,6 +469,9 @@ pub struct ContextGraphConfig {
     pub soft_limit_percent: u8,
     pub on_branch_complete: BranchCompletion,
     pub recall_timeout_secs: u64,
+    pub recall_wait_ms: u64,
+    pub speculative_recall: bool,
+    pub lexical_share_percent: u8,
     pub rebuild_overlap_percent: u8,
     pub edit_creates_branch: bool,
 }
@@ -466,7 +479,7 @@ pub struct ContextGraphConfig {
 impl Default for ContextGraphConfig {
     fn default() -> Self {
         Self {
-            mode: ContextMode::Full,
+            mode: ContextMode::Auto,
             index_model: None,
             screen_model: None,
             read_model: None,
@@ -480,6 +493,9 @@ impl Default for ContextGraphConfig {
             soft_limit_percent: 50,
             on_branch_complete: BranchCompletion::Notify,
             recall_timeout_secs: 120,
+            recall_wait_ms: 3_000,
+            speculative_recall: true,
+            lexical_share_percent: 15,
             rebuild_overlap_percent: 50,
             edit_creates_branch: true,
         }
@@ -518,6 +534,14 @@ impl From<ContextGraphToml> for ContextGraphConfig {
                 .recall_timeout_secs
                 .unwrap_or(defaults.recall_timeout_secs)
                 .max(1),
+            recall_wait_ms: toml.recall_wait_ms.unwrap_or(defaults.recall_wait_ms),
+            speculative_recall: toml
+                .speculative_recall
+                .unwrap_or(defaults.speculative_recall),
+            lexical_share_percent: toml
+                .lexical_share_percent
+                .unwrap_or(defaults.lexical_share_percent)
+                .min(50),
             rebuild_overlap_percent: toml
                 .rebuild_overlap_percent
                 .unwrap_or(defaults.rebuild_overlap_percent)

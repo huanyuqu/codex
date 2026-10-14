@@ -106,8 +106,10 @@ async fn run_turn(server: &mut TestAppServer, thread_id: &str, text: &str) -> Re
 async fn context_graph_requests_track_branches_merges_and_modes() -> Result<()> {
     let mock = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
+    // Full mode, which does not recall, until the test switches it.
     MockResponsesConfig::new(&mock.uri())
         .enable_feature(Feature::ContextGraph)
+        .with_extra_config("[context_graph]\nmode = \"full\"")
         .write(codex_home.path())?;
     let mut server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -435,7 +437,10 @@ async fn context_graph_requests_report_unknown_branches() -> Result<()> {
     let ThreadStartResponse { thread, .. } =
         timeout(DEFAULT_READ_TIMEOUT, server.read_response(start)).await??;
     run_turn(&mut server, &thread.id, "hello").await?;
-    read_graph_until(&mut server, &thread.id, |graph| !graph.branches.is_empty()).await?;
+    let graph =
+        read_graph_until(&mut server, &thread.id, |graph| !graph.branches.is_empty()).await?;
+    // Threads recall once their history fills the soft limit, unless configured otherwise.
+    assert_eq!(graph.mode, Some(ContextGraphMode::Auto));
 
     let preview = server
         .send_raw_request(

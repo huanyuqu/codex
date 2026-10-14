@@ -1450,6 +1450,13 @@
           "description": "Model that writes block cards. Defaults to the provider's memory extraction model.",
           "type": "string"
         },
+        "lexical_share_percent": {
+          "description": "Share of the recall budget, in percent, for summaries of blocks that match the request's words but that the screening did not pick. 0 adds none.",
+          "format": "uint8",
+          "maximum": 50.0,
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "mode": {
           "allOf": [
             {
@@ -1484,9 +1491,15 @@
           "type": "integer"
         },
         "recall_timeout_secs": {
-          "description": "Longest a recall may take before the turn goes on without it, in seconds.",
+          "description": "Longest a recall may take before it is given up, in seconds.",
           "format": "uint64",
           "minimum": 1.0,
+          "type": "integer"
+        },
+        "recall_wait_ms": {
+          "description": "Longest a turn waits for the recall of its request before it goes on, in milliseconds. A recall that finishes later is added before a later model request of the turn.",
+          "format": "uint64",
+          "minimum": 0.0,
           "type": "integer"
         },
         "recent_turns": {
@@ -1526,6 +1539,10 @@
           "maximum": 95.0,
           "minimum": 10.0,
           "type": "integer"
+        },
+        "speculative_recall": {
+          "description": "Whether recall runs in the background when a turn ends, so the next turn can start from its result instead of waiting.",
+          "type": "boolean"
         }
       },
       "type": "object"
