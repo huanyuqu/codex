@@ -26,6 +26,7 @@ use codex_context_graph_store::ModelCompletion;
 use codex_context_graph_store::RecallConfig;
 use codex_context_graph_store::RecallStats;
 use codex_context_graph_store::Recaller;
+use codex_context_graph_store::ScreenStrategy;
 use codex_context_graph_store::ShadowModel;
 use serde::Deserialize;
 use serde::Serialize;
@@ -50,6 +51,11 @@ pub enum Condition {
     Recall {
         screen: String,
         read: Option<String>,
+        /// How the cards are screened.
+        strategy: ScreenStrategy,
+        /// Share of the budget, in percent, for lexical matches the screening did not pick,
+        /// when it differs from the run's.
+        lexical_share: Option<u8>,
     },
     /// The probe's support blocks, as an upper bound for selection.
     Oracle,
@@ -59,7 +65,9 @@ impl FromStr for Condition {
     type Err = anyhow::Error;
 
     /// Parses `full`, `window`, `bm25`, `oracle`, `recall:SCREEN` (reads with the screening
-    /// model), `recall:SCREEN+READ` or `recall:SCREEN+none`.
+    /// model), `recall:SCREEN+READ` or `recall:SCREEN+none`. A recall condition can end in
+    /// options: `@pointwise` or `@cascade` to screen that way, and `@lexN` to give lexical
+    /// matches N percent of the budget, such as `@lex0` for none.
     fn from_str(name: &str) -> anyhow::Result<Self> {
         Ok(match name {
             "full" => Self::Full,
@@ -67,9 +75,34 @@ impl FromStr for Condition {
             "bm25" => Self::Bm25,
             "oracle" => Self::Oracle,
             _ => {
-                let models = name
+                let recall = name
                     .strip_prefix("recall:")
                     .with_context(|| format!("unknown condition {name}"))?;
+                let mut parts = recall.split('@');
+                let models = parts.next().unwrap_or_default();
+                anyhow::ensure!(!models.is_empty(), "{name} names no screening model");
+                let mut strategy = ScreenStrategy::Listwise;
+                let mut lexical_share = None;
+                for option in parts {
+                    match option {
+                        "listwise" => strategy = ScreenStrategy::Listwise,
+                        "pointwise" => strategy = ScreenStrategy::Pointwise,
+                        "cascade" => strategy = ScreenStrategy::Cascade,
+                        _ => {
+                            let share = option
+                                .strip_prefix("lex")
+                                .and_then(|share| share.parse::<u8>().ok())
+                                .filter(|share| *share <= 50)
+                                .with_context(|| {
+                                    format!(
+                                        "unknown option @{option} in {name}; use @pointwise, \
+                                         @cascade or @lex0 to @lex50"
+                                    )
+                                })?;
+                            lexical_share = Some(share);
+                        }
+                    }
+                }
                 let (screen, read) = match models.split_once('+') {
                     Some((screen, "none")) => (screen, None),
                     Some((screen, read)) => (screen, Some(read.to_string())),
@@ -78,6 +111,8 @@ impl FromStr for Condition {
                 Self::Recall {
                     screen: screen.to_string(),
                     read,
+                    strategy,
+                    lexical_share,
                 }
             }
         })
@@ -91,13 +126,41 @@ impl fmt::Display for Condition {
             Self::Window => write!(f, "window"),
             Self::Bm25 => write!(f, "bm25"),
             Self::Oracle => write!(f, "oracle"),
-            Self::Recall { screen, read } => match read {
-                Some(read) if read == screen => write!(f, "recall:{screen}"),
-                Some(read) => write!(f, "recall:{screen}+{read}"),
-                None => write!(f, "recall:{screen}+none"),
-            },
+            Self::Recall {
+                screen,
+                read,
+                strategy,
+                lexical_share,
+            } => {
+                match read {
+                    Some(read) if read == screen => write!(f, "recall:{screen}")?,
+                    Some(read) => write!(f, "recall:{screen}+{read}")?,
+                    None => write!(f, "recall:{screen}+none")?,
+                }
+                match strategy {
+                    ScreenStrategy::Listwise => {}
+                    ScreenStrategy::Pointwise => write!(f, "@pointwise")?,
+                    ScreenStrategy::Cascade => write!(f, "@cascade")?,
+                }
+                match lexical_share {
+                    Some(share) => write!(f, "@lex{share}"),
+                    None => Ok(()),
+                }
+            }
         }
     }
+}
+
+/// A block a probe context shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShownBlock {
+    pub block_id: BlockId,
+    pub presentation: Presentation,
+    /// Whether the context marks the block outdated.
+    pub marked_outdated: bool,
+    /// Whether the block comes before the recent turns, which every context but the full
+    /// history shows only when something chose it.
+    pub earlier: bool,
 }
 
 /// The context a probe is asked with.
@@ -105,7 +168,7 @@ pub struct ProbeContext {
     pub transcript: String,
     pub tokens: u32,
     /// Blocks the context shows, with how much of each.
-    pub shown: Vec<(BlockId, Presentation, bool)>,
+    pub shown: Vec<ShownBlock>,
     pub recall: Option<RecallStats>,
     /// Whether `Full` had to drop blocks.
     pub truncated: bool,
@@ -129,7 +192,7 @@ impl ContextBuilder {
             Condition::Full => return Ok(self.full(history)),
             Condition::Window => {
                 let start = history.recent_start(self.config.view.recent_turns);
-                return Ok(plain(history, start..history.len()));
+                return Ok(plain(history, start..history.len(), start));
             }
             Condition::Bm25 => {
                 let recent_start = history.recent_start(self.config.view.recent_turns);
@@ -185,14 +248,20 @@ impl ContextBuilder {
             tokens -= history.tokens(kept.remove(position));
             truncated = true;
         }
-        let mut context = plain(history, kept);
+        let recent_start = history.recent_start(self.config.view.recent_turns);
+        let mut context = plain(history, kept, recent_start);
         context.truncated = truncated;
         context
     }
 }
 
-/// The recallable blocks at `indices`, shown in full without the recall preamble.
-fn plain(history: &History<'_>, indices: impl IntoIterator<Item = usize>) -> ProbeContext {
+/// The recallable blocks at `indices`, shown in full without the recall preamble; those before
+/// `recent_start` are earlier ones.
+fn plain(
+    history: &History<'_>,
+    indices: impl IntoIterator<Item = usize>,
+    recent_start: usize,
+) -> ProbeContext {
     let entries: Vec<ViewEntry> = indices
         .into_iter()
         .filter(|index| history.recallable(*index))
@@ -217,7 +286,12 @@ fn plain(history: &History<'_>, indices: impl IntoIterator<Item = usize>) -> Pro
         transcript,
         shown: entries
             .into_iter()
-            .map(|entry| (entry.block_id, entry.presentation, false))
+            .map(|entry| ShownBlock {
+                earlier: entry.index < recent_start,
+                block_id: entry.block_id,
+                presentation: entry.presentation,
+                marked_outdated: false,
+            })
             .collect(),
         recall: None,
         truncated: false,
@@ -232,12 +306,11 @@ fn from_view(history: &History<'_>, view: &ContextView) -> ProbeContext {
         shown: view
             .entries
             .iter()
-            .map(|entry| {
-                (
-                    entry.block_id.clone(),
-                    entry.presentation.clone(),
-                    entry.superseded_by.is_some(),
-                )
+            .map(|entry| ShownBlock {
+                block_id: entry.block_id.clone(),
+                presentation: entry.presentation.clone(),
+                marked_outdated: entry.superseded_by.is_some(),
+                earlier: entry.index < view.recent_start,
             })
             .collect(),
         recall: None,
@@ -265,6 +338,12 @@ pub struct ProbeResult {
     pub support_shown: f64,
     /// Share of the support blocks the context shows in full or as an excerpt.
     pub support_detailed: f64,
+    /// Blocks before the recent turns that the context shows.
+    #[serde(default)]
+    pub selected_blocks: usize,
+    /// Share of those that are support blocks; unset when the context shows none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_precision: Option<f64>,
     /// Outdated blocks the context shows without marking them outdated.
     pub outdated_unmarked: usize,
     pub answer_call: ModelCall,
@@ -300,13 +379,26 @@ pub async fn answer_and_judge(
             .await
             .context("judging failed")?;
 
-    let shown: HashSet<&BlockId> = context.shown.iter().map(|(id, _, _)| id).collect();
+    let shown: HashSet<&BlockId> = context.shown.iter().map(|block| &block.block_id).collect();
     let detailed: HashSet<&BlockId> = context
         .shown
         .iter()
-        .filter(|(_, presentation, _)| *presentation != Presentation::Summary)
-        .map(|(id, _, _)| id)
+        .filter(|block| block.presentation != Presentation::Summary)
+        .map(|block| &block.block_id)
         .collect();
+    let selected: Vec<&BlockId> = context
+        .shown
+        .iter()
+        .filter(|block| block.earlier)
+        .map(|block| &block.block_id)
+        .collect();
+    let selection_precision = (!selected.is_empty()).then(|| {
+        selected
+            .iter()
+            .filter(|block| probe.support.contains(block))
+            .count() as f64
+            / selected.len() as f64
+    });
     let share = |set: &HashSet<&BlockId>| {
         probe.support.iter().filter(|id| set.contains(id)).count() as f64
             / probe.support.len().max(1) as f64
@@ -314,7 +406,7 @@ pub async fn answer_and_judge(
     let outdated_unmarked = context
         .shown
         .iter()
-        .filter(|(id, _, marked)| !marked && probe.outdated.contains(id))
+        .filter(|block| !block.marked_outdated && probe.outdated.contains(&block.block_id))
         .count();
     Ok(ProbeResult {
         probe_id: probe.id.clone(),
@@ -329,6 +421,8 @@ pub async fn answer_and_judge(
         shown_blocks: context.shown.len(),
         support_shown: share(&shown),
         support_detailed: share(&detailed),
+        selected_blocks: selected.len(),
+        selection_precision,
         outdated_unmarked,
         answer_call,
         judge_call,

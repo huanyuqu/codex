@@ -37,8 +37,11 @@ use codex_context_graph_store::IndexRequest;
 use codex_context_graph_store::IndexerConfig;
 use codex_context_graph_store::LocalContextGraphStore;
 use codex_context_graph_store::ModelCall;
+use codex_context_graph_store::ModelScorer;
 use codex_context_graph_store::RecallConfig;
 use codex_context_graph_store::Recaller;
+use codex_context_graph_store::RelevanceScorer;
+use codex_context_graph_store::ScreenStrategy;
 use codex_context_graph_store::ShadowIndexer;
 use codex_context_graph_store::ShadowModel;
 use codex_state::SqliteConfig;
@@ -237,7 +240,9 @@ struct ProbeRunArgs {
     #[arg(long)]
     probes: PathBuf,
 
-    /// Comma-separated conditions: full, window, bm25, oracle, recall:SCREEN[+READ|+none].
+    /// Comma-separated conditions: full, window, bm25, oracle, recall:SCREEN[+READ|+none], where
+    /// recall can end in @pointwise or @cascade to screen that way and @lexN to give lexical
+    /// matches N percent of the budget.
     #[arg(long, value_delimiter = ',')]
     conditions: Vec<String>,
 
@@ -277,7 +282,9 @@ struct ProbeReportArgs {
     #[arg(long)]
     results: PathBuf,
 
-    /// Count only probes that the oracle context answers correctly.
+    /// Count only probes that the oracle context answers correctly and the recent turns alone
+    /// do not, so that answering needs the earlier history. Without window results, the oracle
+    /// alone decides.
     #[arg(long)]
     valid_only: bool,
 }
@@ -567,14 +574,36 @@ async fn probe_run(store: &LocalContextGraphStore, args: ProbeRunArgs) -> anyhow
     let config = recall_config(args.budget, args.recent_turns, args.lexical_share);
     let mut recallers: HashMap<String, Recaller> = HashMap::new();
     for condition in &conditions {
-        if let Condition::Recall { screen, read } = condition {
+        if let Condition::Recall {
+            screen,
+            read,
+            strategy,
+            lexical_share,
+        } = condition
+        {
+            let screen = args.models.model(&endpoint, screen)?;
             let read = match read {
                 Some(read) => Some(args.models.model(&endpoint, read)?),
                 None => None,
             };
+            let config = RecallConfig {
+                strategy: *strategy,
+                ..recall_config(
+                    args.budget,
+                    args.recent_turns,
+                    lexical_share.unwrap_or(args.lexical_share),
+                )
+            };
+            // Pointwise and cascade screening score the cards with the screening model.
+            let scorer: Option<Arc<dyn RelevanceScorer>> = match strategy {
+                ScreenStrategy::Listwise => None,
+                ScreenStrategy::Pointwise | ScreenStrategy::Cascade => {
+                    Some(Arc::new(ModelScorer::new(Arc::clone(&screen))))
+                }
+            };
             recallers.insert(
                 condition.to_string(),
-                Recaller::new(args.models.model(&endpoint, screen)?, read, config),
+                Recaller::new(screen, read, config).with_scorer(scorer),
             );
         }
     }
@@ -629,10 +658,17 @@ async fn probe_run(store: &LocalContextGraphStore, args: ProbeRunArgs) -> anyhow
 fn probe_report(args: &ProbeReportArgs) -> anyhow::Result<()> {
     let results: Vec<ProbeResult> = read_jsonl(&args.results)?;
     let valid: Option<HashSet<&str>> = args.valid_only.then(|| {
-        results
-            .iter()
-            .filter(|result| result.condition == "oracle" && result.verdict == "correct")
-            .map(|result| result.probe_id.as_str())
+        let correct = |condition: &str| -> HashSet<&str> {
+            results
+                .iter()
+                .filter(|result| result.condition == condition && result.verdict == "correct")
+                .map(|result| result.probe_id.as_str())
+                .collect()
+        };
+        let window = correct("window");
+        correct("oracle")
+            .into_iter()
+            .filter(|probe| !window.contains(probe))
             .collect()
     });
     let results: Vec<&ProbeResult> = results
@@ -650,22 +686,47 @@ fn probe_report(args: &ProbeReportArgs) -> anyhow::Result<()> {
             .or_default()
             .push(result);
     }
+    // Support is the recall of the selection and precision the share of the earlier blocks
+    // shown that are support; contexts that show no earlier block have no precision.
     println!(
-        "{:<28} {:>4} {:>6} {:>8} {:>9} {:>8} {:>9} {:>8}",
-        "condition", "n", "score", "correct", "ctx tok", "support", "detailed", "outdated"
+        "{:<36} {:>4} {:>6} {:>8} {:>9} {:>8} {:>9} {:>9} {:>9} {:>8}",
+        "condition",
+        "n",
+        "score",
+        "correct",
+        "ctx tok",
+        "support",
+        "detailed",
+        "selected",
+        "precision",
+        "outdated"
     );
     for (condition, results) in &by_condition {
         let n = results.len() as f64;
         let mean =
             |value: fn(&ProbeResult) -> f64| results.iter().map(|r| value(r)).sum::<f64>() / n;
+        let precisions: Vec<f64> = results
+            .iter()
+            .filter_map(|result| result.selection_precision)
+            .collect();
+        let precision = if precisions.is_empty() {
+            "-".to_string()
+        } else {
+            format!(
+                "{:.3}",
+                precisions.iter().sum::<f64>() / precisions.len() as f64
+            )
+        };
         println!(
-            "{condition:<28} {:>4} {:>6.3} {:>8.3} {:>9.0} {:>8.3} {:>9.3} {:>8}",
+            "{condition:<36} {:>4} {:>6.3} {:>8.3} {:>9.0} {:>8.3} {:>9.3} {:>9.1} {:>9} {:>8}",
             results.len(),
             mean(ProbeResult::score),
             mean(|result| f64::from(u8::from(result.verdict == "correct"))),
             mean(|result| f64::from(result.context_tokens)),
             mean(|result| result.support_shown),
             mean(|result| result.support_detailed),
+            mean(|result| result.selected_blocks as f64),
+            precision,
             results
                 .iter()
                 .map(|result| result.outdated_unmarked)
@@ -685,13 +746,13 @@ fn probe_report(args: &ProbeReportArgs) -> anyhow::Result<()> {
         "
 score by category"
     );
-    print!("{:<28}", "condition");
+    print!("{:<36}", "condition");
     for category in &categories {
         print!(" {category:>11}");
     }
     println!();
     for (condition, results) in &by_condition {
-        print!("{condition:<28}");
+        print!("{condition:<36}");
         for category in &categories {
             let scores: Vec<f64> = results
                 .iter()
