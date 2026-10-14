@@ -39,10 +39,11 @@ the command was stopped with `/stop` or ended with the session.
 
 `/ps` lists the commands running in the background, and `/stop` stops them.
 
-## Not in `codex exec`
+## Not in `codex exec` or subagents
 
 `codex exec` ends with its turn and stops the commands still running, so `exec_command` does not
-offer `background` there.
+offer `background` there. Subagents and internal sessions, such as Guardian reviews, answer
+within their turn and do not get it either.
 
 ## App server
 

@@ -1253,10 +1253,15 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
         && context.tool_policy.expose_additional_permissions;
     let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
     let options = ExecCommandHandlerOptions {
-        // `codex exec` ends with its turn, so a command left running could not report back.
-        include_background_parameter: !matches!(
+        // Only sessions a person talks to run commands in the background: `codex exec` ends with
+        // its turn, so a command left running could not report back, and subagents and internal
+        // sessions such as Guardian reviews answer within their turn.
+        include_background_parameter: matches!(
             turn_context.session_source,
-            codex_protocol::protocol::SessionSource::Exec
+            codex_protocol::protocol::SessionSource::Cli
+                | codex_protocol::protocol::SessionSource::VSCode
+                | codex_protocol::protocol::SessionSource::Mcp
+                | codex_protocol::protocol::SessionSource::Custom(_)
         ),
         allow_tty: features.enabled(Feature::UnifiedExecTty),
         exec_permission_approvals_enabled,
