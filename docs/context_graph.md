@@ -30,22 +30,46 @@ chat's graph. `/fork NAME` names the branch.
 
 | Command | What it does |
 | --- | --- |
-| `/tree` | Lists the branches of the current chat as a tree, with what each is about, how many turns it added and its latest request. Enter switches to a branch. |
-| `/tree NAME` | Switches to the branch with that name, branch ID or thread ID. |
+| `/tree` | Opens the conversation tree: every branch with what it is for, what it is about, how many turns it added and its merges. See below. |
+| `/tree NAME`, `/switch NAME` | Switches to the branch with that name, branch ID or thread ID. `/switch` alone opens the tree. |
 | `/tree NAME --show` | Shows what folding the branch into the current chat would add, without switching. |
-| `/branch` | Shows the current branch: where it was forked from and which branches it references. |
-| `/branch NAME` | Renames the current branch. |
+| `/branch` | Shows the current branch: what it is for, where it was forked from and which branches it references. |
+| `/branch rename NAME` | Renames the current branch (`/branch NAME` does too). |
+| `/branch purpose TEXT` | Says what the current branch is for. Its model is told, and `/tree` shows it. `/branch purpose` alone shows it. |
+| `/branch archive NAME`, `/branch unarchive NAME` | Archives a branch, or restores it. An archived branch keeps its history but leaves the merge picker. |
 | `/fork NAME` | Forks the chat into a new branch and switches to it. |
 | `/fork --at TURN [NAME]` | Forks the chat after turn `TURN`, leaving the later turns out of the new branch. |
 | `/fork --bg [--worktree] [--name NAME] PROMPT` | Forks a branch that works on `PROMPT` in the background while this chat stays open. |
-| `/merge` | Opens a picker of the other branches. |
-| `/merge NAME…` | Folds each named branch into the current chat. |
-| `/merge --reference NAME…` | References each named branch instead: recall chooses from its history. |
-| `/merge --synthesize NAME…` | A model reads the branch and writes the merge note. |
-| `/merge --inline NAME…` | Copies the branch's history into the chat as text, for short branches. |
+| `/fork … --purpose TEXT` | Any fork can say what the new branch is for; quote TEXT when it has spaces. |
+| `/merge` | Opens a picker of the other branches and of other saved chats. |
+| `/merge NAME…` | Folds the named branches into the current chat, as one note. A saved chat's thread ID works too: the chat joins the conversation as a branch first. |
+| `/merge --reference NAME…` | References the branches instead: recall chooses from their histories. |
+| `/merge --synthesize NAME…` | A model reads the branches and writes one merge note that keeps each result attributed to its branch and points out where they disagree. |
+| `/merge --inline NAME…` | Copies the branches' histories into the chat as text, for short branches. |
+| `/merge … --goal TEXT` | Says what the merge is for; a synthesized note focuses on it. |
+| `/merge … --code` | Also merges the code of branches that work in their own git worktree. |
 | `/merge` in a side conversation | Folds the side conversation's questions and answers into its parent chat and returns there. |
-| `/context` | Shows the context mode, the branch and the latest recalls. |
+| `/context` | Shows the context mode, the branch, the latest recalls, what the latest one chose and why, and how often the model had to read blocks recall left out. |
 | `/context full\|auto\|recall` | Switches the context mode of the chat from its next turn. |
+| `/recall` | Rebuilds the chat's history by recall before the next turn, whatever the mode. |
+| `/recall QUESTION` | Shows what recall would choose for QUESTION, without changing anything. |
+
+### The conversation tree
+
+`/tree` lists the branches with forks indented under the branch they left.
+
+| Key | What it does |
+| --- | --- |
+| ↑ ↓, `j` `k` | Move. |
+| → or `l` | Expands a branch to its turns, then a turn to its blocks, each with its card's title and size. |
+| ← or `h` | Collapses, or moves to the parent row. |
+| Enter | On a branch, switches to it; on a turn or block, reads it. |
+| `p` | Reads the turn or block in the pager, from whichever branch recorded it. |
+| `f` | Forks the branch after the selected turn and switches to the fork. |
+| `m`, `r` | Merges the selected branch into the current chat: folds it, or references it. |
+| `a` | Archives the selected branch, or restores it. |
+| `/` | Searches the cards of every branch, without calling a model. Enter on a hit reads it, `f` forks after its turn. |
+| Esc | Leaves the search, then closes the tree. |
 
 Editing an earlier prompt (Esc Esc, then pick the prompt) continues in a new
 branch that leaves the edited turn and everything after it out; the original
@@ -53,7 +77,7 @@ conversation stays as it was. Set `edit_creates_branch = false` to rewind the
 chat instead, as Codex does without the context graph.
 
 The status line can show the current branch: add `context-branch` to
-`tui.status_line`.
+`tui.status_line`. It also counts the background branches still working.
 
 A fold adds a summary of what the branch did after it left the current chat:
 each turn's request and result, the constraints, decisions and findings its
@@ -69,10 +93,21 @@ Writing `@NAME` in a message references the branch for that turn: in `auto`
 and `recall` mode it becomes a reference and the history is recalled at once;
 in `full` mode the branch is folded in instead.
 
+A synthesized note cites the blocks each statement rests on by block ID, which
+`context_expand` reads. Branches too long for one prompt are condensed part by
+part first. A merge with `--code` commits a branch's uncommitted work in its
+worktree, then runs `git merge --no-ff` in the current chat's worktree; when
+the merge stops at conflicts, it is left for you or the model to resolve, and
+the merge note lists the conflicting files. Merging a branch that shares the
+current workspace with `--code` is refused, since its changes are already
+there.
+
 The agent can branch on its own, too. `branch_create` forks the conversation
 into a sub-agent that works on a task with the whole history so far, and
 `branch_merge` waits for a branch to finish and merges it in any of the four
-ways. Its branches show up in `/tree` like any other.
+ways, optionally toward a `goal`. Its branches show up in `/tree` like any
+other. Sub-agents that `spawn_agent` starts without the history join the
+conversation as branches too, named after the agent.
 
 ### Background branches and shared workspaces
 
@@ -111,6 +146,25 @@ history by words, `context_expand` reads a block or a whole turn in full, and
 `context_recall` asks the screening model for the parts of the history a
 question needs.
 
+When the screening is unsure, because the request refers to something the
+cards do not show, chains several earlier steps, or leaves many blocks
+undecided, `escalate_model` screens again with the same prompt. A history too
+long for one catalog is first narrowed to the episodes the request needs, then
+screened block by block within them.
+
+`screen` changes how cards are judged. `listwise`, the default, has the
+screening model read every card and choose. `pointwise` scores each card on its
+own and picks the best; `cascade` scores every card, then lets the screening
+model choose among the best ones. Scores come from `rerank_url`, a rerank
+endpoint in the common `/rerank` format, or from the screening model when no
+endpoint is set. A rerank endpoint receives the text of the cards.
+
+Every recall is recorded in the chat's rollout as a `context_view_recalled`
+event, with the blocks it showed, why, and how much of each, so what the model
+saw can be audited later. Each `context_expand` of a block is counted, and so is
+each block it reads that the recalled history had left out; `/context` shows
+both.
+
 While a chat is idle, the shadow agent consolidates its settled turns: runs of
 turns become episode cards, and the branch gets a card that says what it is
 about. A long history's map of earlier turns sums up episodes in one line each,
@@ -133,6 +187,11 @@ on_branch_complete = "notify"   # notify | fold, for /fork --bg
 recall_timeout_secs = 120       # give up on recall and fall back after this long
 rebuild_overlap_percent = 50    # rebuild the recalled history when less of it still fits
 edit_creates_branch = true      # editing an earlier prompt forks instead of rewinding
+escalate_model = "gpt-6.1-sol"  # screens again when the first screening is unsure
+screen = "listwise"             # listwise | pointwise | cascade
+rerank_url = "http://localhost:8080/rerank"   # scores cards for pointwise and cascade
+rerank_model = "qwen3-reranker"
+rerank_api_key_env = "RERANK_API_KEY"
 ```
 
 A recalled history is kept from turn to turn: later turns are appended to it,
@@ -147,16 +206,27 @@ Clients use these experimental requests; the TUI uses them for `/tree` and
 
 | Request | What it does |
 | --- | --- |
-| `contextGraph/read` | The branches of a thread's graph in tree order, and its merges. |
-| `contextGraph/merge` | Merges a branch into a thread: fold, reference, synthesize or inline. |
-| `contextGraph/branch/rename` | Renames a thread's branch, also before the thread first records. |
+| `contextGraph/read` | The branches of a thread's graph in tree order, with their purposes and statuses, and its merges. |
+| `contextGraph/branch/read` | A branch's turns, inherited and its own, each with its blocks. |
+| `contextGraph/block/read` | A block as text, read from whichever branch recorded it. |
+| `contextGraph/search` | Blocks of every branch whose cards match words, files or symbols. |
+| `contextGraph/merge` | Merges branches or saved chats into a thread as one note: fold, reference, synthesize or inline, with an optional goal and code merge. |
+| `contextGraph/branch/update` | Renames a branch, sets what it is for, or archives or restores it; also before the thread first records. |
 | `contextGraph/branch/preview` | What folding a branch into a thread would add. |
 | `contextGraph/mode/set` | Switches a loaded thread's context mode. |
-| `contextGraph/views/read` | The views recall built for a thread, most recent first. |
+| `contextGraph/recall` | Shows the view recall would build for a question, or asks for a rebuild before the next turn. |
+| `contextGraph/views/read` | The views recall built for a thread, most recent first, with the blocks each showed and why, and the counts of expanded and missed blocks. |
 
-`contextGraph/updated` notifies clients when a merge or rename changes a graph.
+`contextGraph/updated` notifies clients when a merge or a branch change alters
+a graph, and `contextGraph/cardsUpdated` when the shadow agent wrote cards.
+Forks are made with `thread/fork`; a fork of a recorded chat joins its graph.
 
 ## Saved conversations
+
+`/tree` and `/merge` work on the context graph; without the `context_graph`
+feature they say how to turn it on. The earlier `codex merge` command of the npm
+package, which merges saved conversations into a new one, still works on its
+own.
 
 `codex graph import` records the saved conversations that ran without the
 context graph, so their forks show up as branches in `/tree`. Merges made with
@@ -165,6 +235,11 @@ conversations they merged are joined. `--dry-run` lists what would be imported;
 thread IDs limit the import to those conversations, and `--archived` includes
 archived ones. A conversation whose history is stored in pages is imported from
 the latest history its model saw, so turns compacted away before are missing.
+
+`codex graph export THREAD_ID` writes the graph of that conversation:
+`--format tree` (the default) as an indented list of branches, `--format
+mermaid` as a flowchart of branches, forks and merges, and `--format json` as
+the whole graph with its cards and merges. `-o FILE` writes to a file.
 
 Deleting a conversation deletes what the graph derived from it.
 

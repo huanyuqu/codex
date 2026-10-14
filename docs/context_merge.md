@@ -1,5 +1,9 @@
 # Conversation graph merge
 
+> The interactive `/merge` and `/tree` of the TUI now work on the context graph;
+> see [context_graph.md](context_graph.md). The sections below about the TUI
+> describe the earlier helper they replaced. `codex merge` works as described.
+
 `codex merge A_ID B_ID C_ID` combines conversation context into a new resumable
 Codex thread. It works for discussion, writing, research, planning, and coding.
 The first source is the primary conversation. Sources remain unchanged.

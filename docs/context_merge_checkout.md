@@ -1,5 +1,9 @@
 # 在此分支使用上下文图 merge
 
+> TUI 里的 `/merge` 和 `/tree` 已改为基于上下文图（context graph）实现，见
+> [context_graph.md](context_graph.md)。下文关于 TUI 的部分描述的是被替换掉的旧实现；
+> `codex merge` 命令仍按下文工作。
+
 当前功能在 `huanyuqu/codex` 的 `context-graph` 分支。`origin` 指向你的 fork，
 `upstream` 指向 `openai/codex`。此目录现在包含完整的官方仓库和我们的修改。
 

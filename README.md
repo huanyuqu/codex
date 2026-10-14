@@ -80,6 +80,8 @@ You can also use Codex with an API key, but this requires [additional setup](htt
 
 This repository is licensed under the [Apache-2.0 License](LICENSE).
 
-## Conversation graph merge
+## Context graph
 
-This fork adds conversation context merging with semantic synthesis by default, interactive `/merge`, and `/tree` branch navigation with pending-source indicators. Use `/merge --update` to merge later source changes into a new conversation while preserving current work. See [the merge guide](docs/context_merge.md) and [local checkout instructions](docs/context_merge_checkout.md).
+This fork records each conversation as a context graph: forks are branches that `/tree` browses, searches and switches between, `/merge` folds, references or synthesizes branches back into a chat, and a shadow agent indexes every block so that recall can choose, for each request, which parts of a long history the model sees. See [the context graph guide](docs/context_graph.md).
+
+The `codex merge` command of the npm package still merges saved conversations into a new one; see [the merge guide](docs/context_merge.md) and [local checkout instructions](docs/context_merge_checkout.md).
