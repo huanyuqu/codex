@@ -209,6 +209,10 @@ fn an_earlier_selection_serves_requests_whose_best_matches_it_shows() {
     cards[1].title = "retry backoff in the HTTP client".to_string();
     cards[3].title = "timeout of the HTTP client".to_string();
     let history = history(&cards, &items);
+    let limits = ViewLimits {
+        recent_turns: 1,
+        ..ViewLimits::default()
+    };
     let selection = |ids: &[&str]| Selection {
         question: "earlier request".to_string(),
         picks: ids
@@ -227,14 +231,14 @@ fn an_earlier_selection_serves_requests_whose_best_matches_it_shows() {
         &selection(&["a1"]),
         &history,
         "tune backoff",
-        /*recent_turns*/ 1,
+        limits,
         /*window*/ None,
     ));
     assert!(!serves(
         &selection(&["a1"]),
         &history,
         "raise timeout",
-        /*recent_turns*/ 1,
+        limits,
         /*window*/ None,
     ));
     // What the window holds counts too.
@@ -248,7 +252,7 @@ fn an_earlier_selection_serves_requests_whose_best_matches_it_shows() {
         &selection(&["a1"]),
         &history,
         "raise timeout",
-        /*recent_turns*/ 1,
+        limits,
         Some(&window),
     ));
     // A request with nothing to match is served by any earlier selection.
@@ -256,7 +260,7 @@ fn an_earlier_selection_serves_requests_whose_best_matches_it_shows() {
         &selection(&[]),
         &history,
         "go on",
-        /*recent_turns*/ 1,
+        limits,
         /*window*/ None,
     ));
 }

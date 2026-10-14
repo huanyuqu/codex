@@ -79,6 +79,7 @@ pub use recall::Recaller;
 pub use recall::ScreenStrategy;
 pub use recall::SelectedBlock;
 pub use recall::Selection;
+pub use recall::speculative_question;
 pub use scorer::ModelScorer;
 pub use scorer::RelevanceScorer;
 pub use scorer::RerankScorer;

@@ -37,6 +37,7 @@ use codex_context_graph::screen::build_screen_prompt_within;
 use codex_context_graph::screen::parse_episode_answer;
 use codex_context_graph::screen::parse_screen_answer;
 use codex_context_graph::search::lexical_matches;
+use codex_context_graph::text::truncate;
 use codex_context_graph::view::ContextView;
 use codex_context_graph::view::Pick;
 use codex_context_graph::view::Presentation;
@@ -50,6 +51,23 @@ use serde::Serialize;
 use crate::model::ModelCompletion;
 use crate::model::ShadowModel;
 use crate::scorer::RelevanceScorer;
+
+/// Blocks lexical search ranks highest for a request that an earlier selection must show to
+/// serve it.
+const SERVING_MATCHES: usize = 3;
+/// Characters of a turn's last answer that a recall made ahead of the next turn reads.
+const SPECULATIVE_ANSWER_CHARS: usize = 2_000;
+
+/// The request a recall made when a turn ends reads, since the next request is not known yet:
+/// the ended turn's request and its last answer.
+pub fn speculative_question(request: &str, answer: Option<&str>) -> String {
+    let mut question = request.to_string();
+    if let Some(answer) = answer.map(str::trim).filter(|answer| !answer.is_empty()) {
+        question.push_str("\n\n");
+        question.push_str(&truncate(answer, SPECULATIVE_ANSWER_CHARS));
+    }
+    question
+}
 
 /// How recall screens the cards.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,6 +287,29 @@ impl Selection {
     /// Whether the selection shows the block `block`, picked or as a lexical match.
     pub fn shows(&self, block: &BlockId) -> bool {
         self.picks.iter().any(|pick| &pick.block_id == block) || self.matches.contains(block)
+    }
+
+    /// Whether this selection, made before `question` was asked, serves it too: its view of
+    /// `history` within `limits` shows, or `held` says the context already holds, each of the
+    /// blocks before the recent turns that lexical search ranks highest for the question. The
+    /// view counts what every view shows, such as the task the branch started with. A question
+    /// without lexical matches, such as "go on", is served.
+    pub fn serves(
+        &self,
+        history: &History<'_>,
+        question: &str,
+        limits: ViewLimits,
+        held: impl Fn(usize) -> bool,
+    ) -> bool {
+        let recent_start = history.recent_start(limits.recent_turns);
+        let matches = lexical_matches(history, question, recent_start, SERVING_MATCHES);
+        if matches.is_empty() {
+            return true;
+        }
+        let view = self.plan(history, limits).view;
+        matches
+            .into_iter()
+            .all(|index| view.shows(index) || held(index))
     }
 }
 

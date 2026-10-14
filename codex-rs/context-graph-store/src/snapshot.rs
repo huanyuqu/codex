@@ -126,6 +126,18 @@ impl BranchSnapshot {
 
     /// The history up to the end of turn `until_turn`, or all of it.
     pub fn history(&self, until_turn: Option<usize>) -> History<'_> {
+        let full = self.history_until_block(self.blocks.len());
+        let Some(until_turn) = until_turn else {
+            return full;
+        };
+        let end = (0..full.len())
+            .find(|index| full.turn(*index) > until_turn)
+            .unwrap_or(full.len());
+        self.history_until_block(end)
+    }
+
+    /// The history of the first `end` blocks, such as a turn's history up to its request.
+    pub fn history_until_block(&self, end: usize) -> History<'_> {
         let blocks: Vec<HistoryBlock<'_>> = self
             .cards
             .iter()
@@ -140,15 +152,9 @@ impl BranchSnapshot {
                 origin: origin.as_deref(),
                 changed: *changed,
             })
+            .take(end)
             .collect();
-        let full = History::new(blocks.clone()).with_episodes(&self.episodes);
-        let Some(until_turn) = until_turn else {
-            return full;
-        };
-        let end = (0..full.len())
-            .find(|index| full.turn(*index) > until_turn)
-            .unwrap_or(full.len());
-        History::new(blocks[..end].to_vec()).with_episodes(&self.episodes)
+        History::new(blocks).with_episodes(&self.episodes)
     }
 }
 

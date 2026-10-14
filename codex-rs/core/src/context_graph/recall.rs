@@ -24,7 +24,6 @@ use codex_context_graph::BlockKind;
 use codex_context_graph::history::History;
 use codex_context_graph::search::lexical_matches;
 use codex_context_graph::text::item_text;
-use codex_context_graph::text::truncate;
 use codex_context_graph::view::ContextView;
 use codex_context_graph::view::Reason;
 use codex_context_graph::view::RenderOptions;
@@ -41,6 +40,7 @@ use codex_context_graph_store::Recaller;
 use codex_context_graph_store::ScreenStrategy;
 use codex_context_graph_store::Selection;
 use codex_context_graph_store::ShadowModel;
+use codex_context_graph_store::speculative_question;
 use codex_features::Feature;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::Result as CodexResult;
@@ -66,14 +66,9 @@ use crate::session::step_context::StepContext;
 
 /// Tokens a `context_recall` answer may take.
 const TOOL_RECALL_BUDGET_TOKENS: u32 = 12_000;
-/// Blocks lexical search ranks highest for a request that an earlier recall must show to serve
-/// it.
-const COVERED_MATCHES: usize = 3;
 /// Blocks lexical search ranks highest that a turn adds as summaries while the recall of its
 /// request runs.
 const QUICK_MATCHES: usize = 3;
-/// Characters of a turn's last answer that the recall made for the next turn reads.
-const SPECULATIVE_ANSWER_CHARS: usize = 2_000;
 /// The selector named in records of views made by lexical search alone.
 const LEXICAL_SELECTOR: &str = "lexical";
 
@@ -427,7 +422,7 @@ impl ContextGraphService {
                 &selection,
                 history,
                 question,
-                self.config.recent_turns,
+                self.view_limits(self.config.recall_budget_tokens, self.config.recent_turns),
                 window,
             )
         {
@@ -741,26 +736,26 @@ fn request_text(history: &History<'_>, question: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-/// Whether `selection`, made before `question` was asked, serves it too: it shows, or the
-/// window holds, each block that lexical search ranks highest for the question among the blocks
-/// before the `recent_turns`. A question without lexical matches, such as "go on", is served.
+/// Whether `selection`, made before `question` was asked, serves it too: its view within
+/// `limits` shows, or the window holds, each block before the recent turns that lexical search
+/// ranks highest for the question. A question without lexical matches, such as "go on", is
+/// served.
 fn serves(
     selection: &Selection,
     history: &History<'_>,
     question: &str,
-    recent_turns: usize,
+    limits: ViewLimits,
     window: Option<&RecalledWindow>,
 ) -> bool {
-    let recent_start = history.recent_start(recent_turns);
-    lexical_matches(history, question, recent_start, COVERED_MATCHES)
-        .into_iter()
-        .all(|index| {
-            let block = &history.card(index).block_id;
-            selection.shows(block)
-                || window.is_some_and(|window| {
-                    window.holds(block, history.is_own(index), /*detail*/ 1)
-                })
+    selection.serves(history, question, limits, |index| {
+        window.is_some_and(|window| {
+            window.holds(
+                &history.card(index).block_id,
+                history.is_own(index),
+                /*detail*/ 1,
+            )
         })
+    })
 }
 
 /// What the window holds after it was rebuilt from `view`.
@@ -1024,14 +1019,13 @@ pub(crate) async fn speculate_recall(
     if !service.has_earlier_history(&snapshot, service.config.recent_turns.saturating_sub(1)) {
         return;
     }
-    let mut question = request_text(
-        &snapshot.history(/*until_turn*/ None),
-        /*question*/ None,
+    let question = speculative_question(
+        &request_text(
+            &snapshot.history(/*until_turn*/ None),
+            /*question*/ None,
+        ),
+        answer,
     );
-    if let Some(answer) = answer.map(str::trim).filter(|answer| !answer.is_empty()) {
-        question.push_str("\n\n");
-        question.push_str(&truncate(answer, SPECULATIVE_ANSWER_CHARS));
-    }
     let job = service.start_job(snapshot, question, JobKind::Speculative);
     service.put_job(job);
 }
