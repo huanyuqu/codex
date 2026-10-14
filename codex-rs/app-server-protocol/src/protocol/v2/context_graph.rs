@@ -354,6 +354,16 @@ pub struct ContextGraphView {
     /// The blocks the view shows, in history order.
     #[serde(default)]
     pub entries: Vec<ContextGraphViewEntry>,
+    /// How the view reached the context window: "waited" when the turn waited for it,
+    /// "speculative" when it was made as the previous turn ended, "earlier" when it was made for
+    /// the previous request, "deferred" when it joined the turn between model requests, or
+    /// "lexical" when lexical search alone chose while the recall ran. Unset for previews and
+    /// for recalls the model asked for.
+    #[serde(default)]
+    pub delivery: Option<String>,
+    /// How long the turn waited for the recall, in milliseconds, when it reached the window.
+    #[serde(default)]
+    pub waited_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -364,7 +374,8 @@ pub struct ContextGraphViewEntry {
     pub title: String,
     /// How much of the block the view shows: "full", "excerpt" or "summary".
     pub presentation: String,
-    /// Why the view shows it: "recent", "taskStart", "selected", "dependency" or "successor".
+    /// Why the view shows it: "recent", "task_start", "selected", "dependency", "successor" or
+    /// "lexical", a block that matches the request's words but that no selector picked.
     pub reason: String,
     pub tokens: u32,
     /// What the selector said about the block.

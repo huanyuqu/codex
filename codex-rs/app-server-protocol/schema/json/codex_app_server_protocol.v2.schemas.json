@@ -7037,6 +7037,14 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "delivery": {
+          "default": null,
+          "description": "How the view reached the context window: \"waited\" when the turn waited for it, \"speculative\" when it was made as the previous turn ended, \"earlier\" when it was made for the previous request, \"deferred\" when it joined the turn between model requests, or \"lexical\" when lexical search alone chose while the recall ran. Unset for previews and for recalls the model asked for.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "entries": {
           "default": [],
           "description": "The blocks the view shows, in history order.",
@@ -7063,6 +7071,16 @@
           "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "waitedMs": {
+          "default": null,
+          "description": "How long the turn waited for the recall, in milliseconds, when it reached the window.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -7092,7 +7110,7 @@
           "type": "string"
         },
         "reason": {
-          "description": "Why the view shows it: \"recent\", \"taskStart\", \"selected\", \"dependency\" or \"successor\".",
+          "description": "Why the view shows it: \"recent\", \"task_start\", \"selected\", \"dependency\", \"successor\" or \"lexical\", a block that matches the request's words but that no selector picked.",
           "type": "string"
         },
         "title": {

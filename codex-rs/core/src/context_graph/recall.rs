@@ -595,6 +595,11 @@ impl ContextGraphService {
             tokens: recall.view.tokens,
             budget_tokens: recall.view.budget_tokens,
             latency_ms: recall.stats.latency_ms,
+            delivery: recall
+                .stats
+                .delivery
+                .map(|delivery| delivery.name().to_string()),
+            waited_ms: recall.stats.delivery.map(|_| recall.stats.waited_ms),
         }
     }
 

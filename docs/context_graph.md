@@ -178,8 +178,9 @@ endpoint in the common `/rerank` format, or from the screening model when no
 endpoint is set. A rerank endpoint receives the text of the cards.
 
 Every recall is recorded in the chat's rollout as a `context_view_recalled`
-event, with the blocks it showed, why, and how much of each, so what the model
-saw can be audited later. Each `context_expand` of a block is counted, and so is
+event, with the blocks it showed, why, and how much of each, how it reached the
+context window and how long the turn waited for it, so what the model saw can
+be audited later. `/context` lists the latest recalls the same way. Each `context_expand` of a block is counted, and so is
 each block it reads that the recalled history had left out; `/context` shows
 both.
 
@@ -269,3 +270,13 @@ Deleting a conversation deletes what the graph derived from it.
 `codex-context-graph-eval` indexes saved rollouts, recalls from them at any
 turn, and runs probe benchmarks that compare recall with the full history and
 other selectors. Run it with `--help` for the commands.
+
+`probe-run --conditions` takes `full`, `window`, `bm25`, `oracle` and
+`recall:SCREEN[+READ|+none]`. A recall condition can end in `@pointwise` or
+`@cascade` to screen that way, and in `@lexN` to give lexical matches N percent
+of the budget, so one run can compare, for example,
+`recall:luna+none,recall:luna+none@lex0,recall:luna+none@cascade`.
+`probe-report` shows, for each condition, the score, the share of support
+blocks shown (the selection's recall), and the share of the earlier blocks
+shown that are support (its precision). `--valid-only` counts only probes that
+the oracle context answers and the recent turns alone do not.

@@ -178,6 +178,19 @@ pub enum RecallDelivery {
     Lexical,
 }
 
+impl RecallDelivery {
+    /// The name of the delivery, as records show it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Waited => "waited",
+            Self::Speculative => "speculative",
+            Self::Earlier => "earlier",
+            Self::Deferred => "deferred",
+            Self::Lexical => "lexical",
+        }
+    }
+}
+
 #[expect(
     clippy::trivially_copy_pass_by_ref,
     reason = "serde passes the field by reference"

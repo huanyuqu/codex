@@ -8,7 +8,8 @@ export type ContextGraphViewEntry = { blockId: string, title: string,
  */
 presentation: string,
 /**
- * Why the view shows it: "recent", "taskStart", "selected", "dependency" or "successor".
+ * Why the view shows it: "recent", "task_start", "selected", "dependency", "successor" or
+ * "lexical", a block that matches the request's words but that no selector picked.
  */
 reason: string, tokens: number,
 /**

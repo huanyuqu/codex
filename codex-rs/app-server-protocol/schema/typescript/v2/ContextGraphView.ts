@@ -23,4 +23,16 @@ tokens: number, budgetTokens: number, latencyMs: bigint,
 /**
  * The blocks the view shows, in history order.
  */
-entries: Array<ContextGraphViewEntry>, };
+entries: Array<ContextGraphViewEntry>,
+/**
+ * How the view reached the context window: "waited" when the turn waited for it,
+ * "speculative" when it was made as the previous turn ended, "earlier" when it was made for
+ * the previous request, "deferred" when it joined the turn between model requests, or
+ * "lexical" when lexical search alone chose while the recall ran. Unset for previews and
+ * for recalls the model asked for.
+ */
+delivery: string | null,
+/**
+ * How long the turn waited for the recall, in milliseconds, when it reached the window.
+ */
+waitedMs: bigint | null, };

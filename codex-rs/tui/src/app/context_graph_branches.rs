@@ -171,11 +171,12 @@ fn context_status(
         for view in &views.views {
             let question: String = view.question.chars().take(60).collect();
             lines.push(format!(
-                "  {} blocks, about {} of {} tokens, {:.1}s: {question}",
+                "  {} blocks, about {} of {} tokens, {:.1}s{}: {question}",
                 view.blocks,
                 view.tokens,
                 view.budget_tokens,
-                view.latency_ms as f64 / 1000.0
+                view.latency_ms as f64 / 1000.0,
+                delivery_note(view)
             ));
         }
         if let Some(latest) = views.views.first() {
@@ -192,6 +193,25 @@ fn context_status(
         ));
     }
     lines
+}
+
+/// How a recalled view reached the context window, as a clause to follow its numbers; empty
+/// for views that say nothing about it.
+fn delivery_note(view: &ContextGraphView) -> String {
+    let waited = view.waited_ms.unwrap_or_default() as f64 / 1000.0;
+    let waited_too = if waited > 0.0 {
+        format!("; the turn waited {waited:.1}s")
+    } else {
+        String::new()
+    };
+    match view.delivery.as_deref() {
+        Some("waited") => format!(", the turn waited {waited:.1}s"),
+        Some("speculative") => format!(", made as the previous turn ended{waited_too}"),
+        Some("earlier") => format!(", made for the previous request{waited_too}"),
+        Some("deferred") => ", added while the turn ran".to_string(),
+        Some("lexical") => ", lexical matches while recall ran".to_string(),
+        _ => String::new(),
+    }
 }
 
 /// The blocks a recalled view chose, one line each, ending with how many are not listed.
@@ -1705,9 +1725,9 @@ mod tests {
                 note: None,
             }
         };
-        let views = ContextGraphViewsReadResponse {
-            views: vec![codex_app_server_protocol::ContextGraphView {
-                question: "why did the retry test fail".to_string(),
+        let view = |question: &str, delivery: Option<&str>, waited_ms: Option<u64>| {
+            codex_app_server_protocol::ContextGraphView {
+                question: question.to_string(),
                 selector: "gpt-6-luna".to_string(),
                 blocks: 7,
                 tokens: 5_200,
@@ -1717,9 +1737,20 @@ mod tests {
                     entry("add retries with backoff", "task_start", "full", 120),
                     entry("$ cargo test retry", "selected", "excerpt", 900),
                     entry("Cap the backoff at 30s", "dependency", "summary", 60),
+                    entry("retry_limit in config.rs", "lexical", "summary", 40),
                     entry("latest request", "recent", "full", 400),
                 ],
-            }],
+                delivery: delivery.map(str::to_string),
+                waited_ms,
+            }
+        };
+        let views = ContextGraphViewsReadResponse {
+            views: vec![
+                view("why did the retry test fail", Some("waited"), Some(1_200)),
+                view("now fix it", Some("speculative"), Some(0)),
+                view("and the timeout test?", Some("deferred"), Some(0)),
+                view("an older recall", None, None),
+            ],
             feedback: Some(codex_app_server_protocol::ContextGraphRecallFeedback {
                 expanded: 3,
                 missed: 1,

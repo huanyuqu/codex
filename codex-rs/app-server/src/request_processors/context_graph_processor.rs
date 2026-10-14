@@ -513,6 +513,8 @@ impl TurnRequestProcessor {
                             note: entry.note,
                         })
                         .collect(),
+                    delivery: None,
+                    waited_ms: None,
                 })
             }
             None => None,
@@ -614,6 +616,11 @@ impl TurnRequestProcessor {
                         note: entry.note.clone(),
                     })
                     .collect(),
+                delivery: record
+                    .stats
+                    .delivery
+                    .map(|delivery| delivery.name().to_string()),
+                waited_ms: record.stats.delivery.map(|_| record.stats.waited_ms),
             })
             .collect();
         Ok(Some(
