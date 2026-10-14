@@ -1726,3 +1726,5 @@ fn xcode_26_4_mcp_elicitations_auto_deny(
 
 #[path = "context_graph_processor.rs"]
 mod context_graph;
+
+pub(crate) use context_graph::ContextGraphRequest;

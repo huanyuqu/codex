@@ -6614,6 +6614,34 @@
       "title": "ContextCompactedNotification",
       "type": "object"
     },
+    "ContextGraphBlock": {
+      "properties": {
+        "blockId": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "What the block holds, such as \"user\", \"assistant\", \"tool\" or \"merge\".",
+          "type": "string"
+        },
+        "title": {
+          "description": "The block card's title.",
+          "type": "string"
+        },
+        "tokens": {
+          "description": "Estimated tokens of the block.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "blockId",
+        "kind",
+        "title",
+        "tokens"
+      ],
+      "type": "object"
+    },
     "ContextGraphBranch": {
       "properties": {
         "branchId": {
@@ -6640,6 +6668,14 @@
           "type": "string"
         },
         "parentBranchId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "purpose": {
+          "default": null,
+          "description": "What the branch is for, as its creator described it.",
           "type": [
             "string",
             "null"
@@ -6699,6 +6735,73 @@
         }
       ]
     },
+    "ContextGraphCardsUpdatedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "blocks": {
+          "description": "How many blocks got cards.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "graphId": {
+          "type": "string"
+        },
+        "threadId": {
+          "description": "The thread whose blocks got new cards.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "blocks",
+        "graphId",
+        "threadId"
+      ],
+      "title": "ContextGraphCardsUpdatedNotification",
+      "type": "object"
+    },
+    "ContextGraphCodeMerge": {
+      "properties": {
+        "conflicts": {
+          "description": "Files left with conflicts, to resolve in the target's worktree.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "files": {
+          "description": "Files the merge changed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "gitBranch": {
+          "description": "The git branch that was merged.",
+          "type": "string"
+        },
+        "mergeCommit": {
+          "description": "The merge commit; null when the merge stopped at conflicts or had nothing to merge.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "snapshotCommit": {
+          "description": "The commit that saved the branch's uncommitted work before the merge.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conflicts",
+        "files",
+        "gitBranch"
+      ],
+      "type": "object"
+    },
     "ContextGraphMerge": {
       "properties": {
         "mode": {
@@ -6750,6 +6853,39 @@
         }
       ]
     },
+    "ContextGraphMergedBranch": {
+      "properties": {
+        "branchId": {
+          "type": "string"
+        },
+        "branchName": {
+          "type": "string"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ContextGraphCodeMerge"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The code merged from the branch's worktree, when the merge included code."
+        },
+        "turns": {
+          "description": "User turns the merged branch added after it diverged.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "branchId",
+        "branchName",
+        "turns"
+      ],
+      "type": "object"
+    },
     "ContextGraphMode": {
       "oneOf": [
         {
@@ -6774,6 +6910,101 @@
           "type": "string"
         }
       ]
+    },
+    "ContextGraphRecallFeedback": {
+      "properties": {
+        "expanded": {
+          "description": "Blocks the model read with `context_expand`.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "missed": {
+          "description": "Of those, blocks the recalled window had left out.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "requested": {
+          "description": "Recalls the user asked for.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expanded",
+        "missed",
+        "requested"
+      ],
+      "type": "object"
+    },
+    "ContextGraphSearchHit": {
+      "properties": {
+        "block": {
+          "$ref": "#/definitions/ContextGraphBlock"
+        },
+        "branchId": {
+          "type": "string"
+        },
+        "branchName": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "turn": {
+          "description": "The turn of that branch the block belongs to.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "block",
+        "branchId",
+        "branchName",
+        "summary",
+        "turn"
+      ],
+      "type": "object"
+    },
+    "ContextGraphTurn": {
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/definitions/ContextGraphBlock"
+          },
+          "type": "array"
+        },
+        "inherited": {
+          "description": "Whether the branch inherited the turn from the branch it was forked from.",
+          "type": "boolean"
+        },
+        "number": {
+          "description": "Position of the turn in the branch's history, counted from 1; 0 for what came before the first request.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "title": {
+          "description": "The request that started the turn.",
+          "type": "string"
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "blocks",
+        "inherited",
+        "number",
+        "title"
+      ],
+      "type": "object"
     },
     "ContextGraphUpdatedNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
@@ -6806,6 +7037,14 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "entries": {
+          "default": [],
+          "description": "The blocks the view shows, in history order.",
+          "items": {
+            "$ref": "#/definitions/ContextGraphViewEntry"
+          },
+          "type": "array"
+        },
         "latencyMs": {
           "format": "uint64",
           "minimum": 0.0,
@@ -6832,6 +7071,44 @@
         "latencyMs",
         "question",
         "selector",
+        "tokens"
+      ],
+      "type": "object"
+    },
+    "ContextGraphViewEntry": {
+      "properties": {
+        "blockId": {
+          "type": "string"
+        },
+        "note": {
+          "description": "What the selector said about the block.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "presentation": {
+          "description": "How much of the block the view shows: \"full\", \"excerpt\" or \"summary\".",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why the view shows it: \"recent\", \"taskStart\", \"selected\", \"dependency\" or \"successor\".",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "tokens": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "blockId",
+        "presentation",
+        "reason",
+        "title",
         "tokens"
       ],
       "type": "object"
@@ -16725,6 +17002,26 @@
             "params"
           ],
           "title": "ContextGraph/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "contextGraph/cardsUpdated"
+              ],
+              "title": "ContextGraph/cardsUpdatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ContextGraphCardsUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "ContextGraph/cardsUpdatedNotification",
           "type": "object"
         },
         {

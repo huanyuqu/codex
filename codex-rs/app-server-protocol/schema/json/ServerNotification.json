@@ -1124,6 +1124,29 @@
       ],
       "type": "object"
     },
+    "ContextGraphCardsUpdatedNotification": {
+      "properties": {
+        "blocks": {
+          "description": "How many blocks got cards.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "graphId": {
+          "type": "string"
+        },
+        "threadId": {
+          "description": "The thread whose blocks got new cards.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "blocks",
+        "graphId",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ContextGraphUpdatedNotification": {
       "properties": {
         "graphId": {
@@ -7352,6 +7375,26 @@
         "params"
       ],
       "title": "ContextGraph/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "contextGraph/cardsUpdated"
+          ],
+          "title": "ContextGraph/cardsUpdatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ContextGraphCardsUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "ContextGraph/cardsUpdatedNotification",
       "type": "object"
     },
     {

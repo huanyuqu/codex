@@ -25,6 +25,10 @@ lastRequest: string | null,
  */
 summary: string | null,
 /**
+ * What the branch is for, as its creator described it.
+ */
+purpose: string | null,
+/**
  * Whether this is the branch of the thread the graph was read for.
  */
 current: boolean, };

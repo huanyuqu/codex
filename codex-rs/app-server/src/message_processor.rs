@@ -30,6 +30,7 @@ use crate::request_processors::AppsRequestProcessor;
 use crate::request_processors::CatalogRequestProcessor;
 use crate::request_processors::CommandExecRequestProcessor;
 use crate::request_processors::ConfigRequestProcessor;
+use crate::request_processors::ContextGraphRequest;
 use crate::request_processors::EnvironmentRequestProcessor;
 use crate::request_processors::FeedbackRequestProcessor;
 use crate::request_processors::FsRequestProcessor;
@@ -1659,24 +1660,57 @@ impl MessageProcessor {
                     .thread_inject_items(&request_id, params)
                     .await
             }
-            // Boxed so the graph handlers do not grow this dispatcher's future.
+            // The graph handlers' futures are built and boxed outside this dispatcher, whose
+            // stack frame debug builds would otherwise grow by each of them.
             ClientRequest::ContextGraphRead { params, .. } => {
-                Box::pin(self.turn_processor.context_graph_read(params)).await
+                self.turn_processor
+                    .context_graph_request(&request_id, ContextGraphRequest::Read(params))
+                    .await
             }
             ClientRequest::ContextGraphMerge { params, .. } => {
-                Box::pin(self.turn_processor.context_graph_merge(&request_id, params)).await
+                self.turn_processor
+                    .context_graph_request(&request_id, ContextGraphRequest::Merge(params))
+                    .await
             }
-            ClientRequest::ContextGraphBranchRename { params, .. } => {
-                Box::pin(self.turn_processor.context_graph_branch_rename(params)).await
+            ClientRequest::ContextGraphBranchUpdate { params, .. } => {
+                self.turn_processor
+                    .context_graph_request(&request_id, ContextGraphRequest::BranchUpdate(params))
+                    .await
+            }
+            ClientRequest::ContextGraphBranchRead { params, .. } => {
+                self.turn_processor
+                    .context_graph_request(&request_id, ContextGraphRequest::BranchRead(params))
+                    .await
+            }
+            ClientRequest::ContextGraphBlockRead { params, .. } => {
+                self.turn_processor
+                    .context_graph_request(&request_id, ContextGraphRequest::BlockRead(params))
+                    .await
+            }
+            ClientRequest::ContextGraphSearch { params, .. } => {
+                self.turn_processor
+                    .context_graph_request(&request_id, ContextGraphRequest::Search(params))
+                    .await
+            }
+            ClientRequest::ContextGraphRecall { params, .. } => {
+                self.turn_processor
+                    .context_graph_request(&request_id, ContextGraphRequest::Recall(params))
+                    .await
             }
             ClientRequest::ContextGraphBranchPreview { params, .. } => {
-                Box::pin(self.turn_processor.context_graph_branch_preview(params)).await
+                self.turn_processor
+                    .context_graph_request(&request_id, ContextGraphRequest::BranchPreview(params))
+                    .await
             }
             ClientRequest::ContextGraphModeSet { params, .. } => {
-                Box::pin(self.turn_processor.context_graph_mode_set(params)).await
+                self.turn_processor
+                    .context_graph_request(&request_id, ContextGraphRequest::ModeSet(params))
+                    .await
             }
             ClientRequest::ContextGraphViewsRead { params, .. } => {
-                Box::pin(self.turn_processor.context_graph_views_read(params)).await
+                self.turn_processor
+                    .context_graph_request(&request_id, ContextGraphRequest::ViewsRead(params))
+                    .await
             }
             ClientRequest::TurnSteer { params, .. } => {
                 self.turn_processor.turn_steer(&request_id, params).await

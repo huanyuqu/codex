@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "blocks": {
+      "description": "How many blocks got cards.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "graphId": {
+      "type": "string"
+    },
+    "threadId": {
+      "description": "The thread whose blocks got new cards.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "blocks",
+    "graphId",
+    "threadId"
+  ],
+  "title": "ContextGraphCardsUpdatedNotification",
+  "type": "object"
+}

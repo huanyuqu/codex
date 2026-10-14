@@ -1018,6 +1018,20 @@ pub(crate) async fn apply_bespoke_event_handling(
             // consumers;
             // v2 clients receive the canonical ContextCompaction item instead.
         }
+        EventMsg::ContextGraphCardsIndexed(event) => {
+            outgoing
+                .send_server_notification(ServerNotification::ContextGraphCardsUpdated(
+                    codex_app_server_protocol::ContextGraphCardsUpdatedNotification {
+                        thread_id: conversation_id.to_string(),
+                        graph_id: event.graph_id,
+                        blocks: event.blocks,
+                    },
+                ))
+                .await;
+        }
+        EventMsg::ContextViewRecalled(..) => {
+            // Clients read recalled views with contextGraph/views/read.
+        }
         EventMsg::DeprecationNotice(event) => {
             let notification = DeprecationNoticeNotification {
                 summary: event.summary,

@@ -4,10 +4,15 @@ use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
+use codex_app_server_protocol::ContextGraphBlockReadParams;
+use codex_app_server_protocol::ContextGraphBlockReadResponse;
 use codex_app_server_protocol::ContextGraphBranchPreviewParams;
 use codex_app_server_protocol::ContextGraphBranchPreviewResponse;
-use codex_app_server_protocol::ContextGraphBranchRenameParams;
-use codex_app_server_protocol::ContextGraphBranchRenameResponse;
+use codex_app_server_protocol::ContextGraphBranchReadParams;
+use codex_app_server_protocol::ContextGraphBranchReadResponse;
+use codex_app_server_protocol::ContextGraphBranchStatus;
+use codex_app_server_protocol::ContextGraphBranchUpdateParams;
+use codex_app_server_protocol::ContextGraphBranchUpdateResponse;
 use codex_app_server_protocol::ContextGraphMerge;
 use codex_app_server_protocol::ContextGraphMergeMode;
 use codex_app_server_protocol::ContextGraphMergeParams;
@@ -17,6 +22,11 @@ use codex_app_server_protocol::ContextGraphModeSetParams;
 use codex_app_server_protocol::ContextGraphModeSetResponse;
 use codex_app_server_protocol::ContextGraphReadParams;
 use codex_app_server_protocol::ContextGraphReadResponse;
+use codex_app_server_protocol::ContextGraphRecallFeedback;
+use codex_app_server_protocol::ContextGraphRecallParams;
+use codex_app_server_protocol::ContextGraphRecallResponse;
+use codex_app_server_protocol::ContextGraphSearchParams;
+use codex_app_server_protocol::ContextGraphSearchResponse;
 use codex_app_server_protocol::ContextGraphUpdatedNotification;
 use codex_app_server_protocol::ContextGraphViewsReadParams;
 use codex_app_server_protocol::ContextGraphViewsReadResponse;
@@ -130,12 +140,15 @@ async fn context_graph_requests_track_branches_merges_and_modes() -> Result<()> 
     let ThreadForkResponse { thread: forked, .. } =
         timeout(DEFAULT_READ_TIMEOUT, server.read_response(fork)).await??;
     run_turn(&mut server, &forked.id, "try jitter instead").await?;
-    let _: ContextGraphBranchRenameResponse = request(
+    let _: ContextGraphBranchUpdateResponse = request(
         &mut server,
-        "contextGraph/branch/rename",
-        ContextGraphBranchRenameParams {
+        "contextGraph/branch/update",
+        ContextGraphBranchUpdateParams {
             thread_id: forked.id.clone(),
-            name: "jitter".to_string(),
+            branch: None,
+            name: Some("jitter".to_string()),
+            purpose: Some("try jitter instead of fixed delays".to_string()),
+            archived: None,
         },
     )
     .await?;
@@ -153,7 +166,71 @@ async fn context_graph_requests_track_branches_merges_and_modes() -> Result<()> 
         .map(|branch| (branch.name.as_str(), branch.depth, branch.current))
         .collect();
     assert_eq!(branches, vec![("main", 0, true), ("jitter", 1, false)]);
+    assert_eq!(
+        graph.branches[1].purpose.as_deref(),
+        Some("try jitter instead of fixed delays")
+    );
     assert_eq!(graph.mode, Some(ContextGraphMode::Full));
+
+    // The branch's turns: the one it inherited and its own.
+    let read: ContextGraphBranchReadResponse = request(
+        &mut server,
+        "contextGraph/branch/read",
+        ContextGraphBranchReadParams {
+            thread_id: main.id.clone(),
+            branch: "jitter".to_string(),
+        },
+    )
+    .await?;
+    let turns: Vec<(u32, bool, &str)> = read
+        .turns
+        .iter()
+        .filter(|turn| turn.number > 0)
+        .map(|turn| (turn.number, turn.inherited, turn.title.as_str()))
+        .collect();
+    assert_eq!(
+        turns,
+        vec![
+            (1, true, "add retries to the client"),
+            (2, false, "try jitter instead")
+        ]
+    );
+    let request_block = read
+        .turns
+        .iter()
+        .find(|turn| turn.number == 2)
+        .and_then(|turn| turn.blocks.first())
+        .map(|block| block.block_id.clone())
+        .unwrap_or_default();
+    let block: ContextGraphBlockReadResponse = request(
+        &mut server,
+        "contextGraph/block/read",
+        ContextGraphBlockReadParams {
+            thread_id: main.id.clone(),
+            block_id: request_block,
+        },
+    )
+    .await?;
+    assert_eq!(block.branch_name, "jitter");
+    assert!(block.text.contains("try jitter instead"), "{block:?}");
+
+    let search: ContextGraphSearchResponse = request(
+        &mut server,
+        "contextGraph/search",
+        ContextGraphSearchParams {
+            thread_id: main.id.clone(),
+            query: "jitter".to_string(),
+            limit: None,
+        },
+    )
+    .await?;
+    assert_eq!(
+        search
+            .hits
+            .first()
+            .map(|hit| (hit.branch_name.as_str(), hit.turn)),
+        Some(("jitter", 2))
+    );
     assert_eq!(graph.merges, Vec::<ContextGraphMerge>::new());
 
     let preview: ContextGraphBranchPreviewResponse = request(
@@ -180,12 +257,19 @@ async fn context_graph_requests_track_branches_merges_and_modes() -> Result<()> 
         "contextGraph/merge",
         ContextGraphMergeParams {
             thread_id: main.id.clone(),
-            branch: "jitter".to_string(),
+            branches: vec!["jitter".to_string()],
             mode: ContextGraphMergeMode::Fold,
+            goal: Some("pick a retry policy".to_string()),
+            code: false,
         },
     )
     .await?;
-    assert_eq!((merged.branch_name.as_str(), merged.turns), ("jitter", 1));
+    let merged: Vec<(&str, u32)> = merged
+        .merged
+        .iter()
+        .map(|merged| (merged.branch_name.as_str(), merged.turns))
+        .collect();
+    assert_eq!(merged, vec![("jitter", 1)]);
     // The rename notified about the fork; the merge notifies about the thread merged into.
     let main_id = main.id.clone();
     let updated = timeout(
@@ -209,8 +293,10 @@ async fn context_graph_requests_track_branches_merges_and_modes() -> Result<()> 
             "contextGraph/merge",
             Some(serde_json::to_value(ContextGraphMergeParams {
                 thread_id: main.id.clone(),
-                branch: "jitter".to_string(),
+                branches: vec!["jitter".to_string()],
                 mode: ContextGraphMergeMode::Reference,
+                goal: None,
+                code: false,
             })?),
         )
         .await?;
@@ -254,12 +340,33 @@ async fn context_graph_requests_track_branches_merges_and_modes() -> Result<()> 
         "contextGraph/merge",
         ContextGraphMergeParams {
             thread_id: main.id.clone(),
-            branch: "jitter".to_string(),
+            branches: vec!["jitter".to_string()],
             mode: ContextGraphMergeMode::Reference,
+            goal: None,
+            code: false,
         },
     )
     .await?;
-    assert_eq!(referenced.branch_name, "jitter");
+    assert_eq!(
+        referenced
+            .merged
+            .first()
+            .map(|merged| merged.branch_name.as_str()),
+        Some("jitter")
+    );
+
+    // Asking for a recall counts the request; the rebuild waits for the next turn.
+    let recall: ContextGraphRecallResponse = request(
+        &mut server,
+        "contextGraph/recall",
+        ContextGraphRecallParams {
+            thread_id: main.id.clone(),
+            question: None,
+            rebuild: true,
+        },
+    )
+    .await?;
+    assert_eq!(recall.view, None);
 
     let views: ContextGraphViewsReadResponse = request(
         &mut server,
@@ -271,6 +378,40 @@ async fn context_graph_requests_track_branches_merges_and_modes() -> Result<()> 
     )
     .await?;
     assert_eq!(views.views.len(), 0);
+    assert_eq!(
+        views.feedback,
+        Some(ContextGraphRecallFeedback {
+            expanded: 0,
+            missed: 0,
+            requested: 1,
+        })
+    );
+
+    // Archiving keeps the branch, marked as archived.
+    let _: ContextGraphBranchUpdateResponse = request(
+        &mut server,
+        "contextGraph/branch/update",
+        ContextGraphBranchUpdateParams {
+            thread_id: main.id.clone(),
+            branch: Some("jitter".to_string()),
+            name: None,
+            purpose: None,
+            archived: Some(true),
+        },
+    )
+    .await?;
+    let graph = read_graph(&mut server, &main.id).await?;
+    assert_eq!(
+        graph
+            .branches
+            .iter()
+            .map(|branch| (branch.name.as_str(), branch.status))
+            .collect::<Vec<_>>(),
+        vec![
+            ("main", ContextGraphBranchStatus::Active),
+            ("jitter", ContextGraphBranchStatus::Archived)
+        ]
+    );
     Ok(())
 }
 
