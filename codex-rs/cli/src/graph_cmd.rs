@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
+use codex_context_graph::BlockId;
+use codex_context_graph_store::BranchTree;
 use codex_context_graph_store::LocalContextGraphStore;
 use codex_context_graph_store::SavedThread;
 use codex_core::config::ConfigBuilder;
@@ -29,6 +31,32 @@ enum GraphAction {
     /// Record saved conversations that ran without the context graph, so their forks show up
     /// as branches in /tree and merges made with the earlier merge tool as merges.
     Import(ImportCommand),
+    /// Write the context graph of a conversation: its branches, merges, blocks and cards.
+    Export(ExportCommand),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ExportFormat {
+    /// The branches as an indented tree with their turns, purposes and merges.
+    Tree,
+    /// A Mermaid flowchart of branches, forks and merges.
+    Mermaid,
+    /// The whole graph with cards and merges, as JSON.
+    Json,
+}
+
+#[derive(Debug, Parser)]
+struct ExportCommand {
+    /// A conversation of the graph to export, by thread ID.
+    #[arg(value_name = "THREAD_ID", value_parser = ThreadId::from_string)]
+    thread: ThreadId,
+
+    #[arg(long, value_enum, default_value_t = ExportFormat::Tree)]
+    format: ExportFormat,
+
+    /// Write to this file instead of standard output.
+    #[arg(long, short = 'o', value_name = "FILE")]
+    output: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -58,6 +86,38 @@ pub(crate) async fn run(
         .build()
         .await?;
     match command.action {
+        GraphAction::Export(export) => {
+            let store = LocalContextGraphStore::open(&config.sqlite)
+                .await
+                .context("failed to open the context graph")?;
+            let tree = store
+                .branch_tree(&export.thread.to_string())
+                .await?
+                .with_context(|| {
+                    format!(
+                        "conversation {} has no context graph; run `codex graph import {}` first",
+                        export.thread, export.thread
+                    )
+                })?;
+            let text = match export.format {
+                ExportFormat::Tree => tree_text(&tree),
+                ExportFormat::Mermaid => {
+                    let merges: Vec<_> = tree
+                        .merges
+                        .iter()
+                        .map(|merge| (&merge.source, &merge.target, merge.mode.as_str()))
+                        .collect();
+                    codex_context_graph::render::branch_mermaid_with_merges(&tree.graph, &merges)
+                }
+                ExportFormat::Json => serde_json::to_string_pretty(&graph_json(&tree))? + "\n",
+            };
+            match export.output {
+                Some(path) => std::fs::write(&path, text)
+                    .with_context(|| format!("failed to write {}", path.display()))?,
+                None => print!("{text}"),
+            }
+            Ok(())
+        }
         GraphAction::Import(import) => {
             let state_db = codex_rollout::state_db::try_init(&config)
                 .await
@@ -98,6 +158,87 @@ pub(crate) async fn run(
             Ok(())
         }
     }
+}
+
+/// The branches as an indented tree, one line each, with their merges.
+fn tree_text(tree: &BranchTree) -> String {
+    let mut text = String::new();
+    for row in tree.rows() {
+        let settings = tree.settings_of(&row);
+        let mut parts = vec![match row.turns {
+            1 => "1 turn".to_string(),
+            turns => format!("{turns} turns"),
+        }];
+        if let Some(purpose) = settings.purpose {
+            parts.push(format!("for: {purpose}"));
+        }
+        if let Some(card) = tree.branch_cards.get(&row.branch) {
+            parts.push(card.title.clone());
+        }
+        if let Some(request) = &row.last_request {
+            parts.push(format!("last: {request}"));
+        }
+        let merged_into = tree.merged_into(&row.branch);
+        if !merged_into.is_empty() {
+            parts.push(format!("merged into {}", merged_into.join(", ")));
+        }
+        if row.status != codex_context_graph::BranchStatus::Active {
+            parts.push(format!("{:?}", row.status).to_lowercase());
+        }
+        let thread = row.thread_id.as_deref().unwrap_or("no chat");
+        text.push_str(&format!(
+            "{}{} ({thread}): {}\n",
+            "  ".repeat(row.depth),
+            row.name,
+            parts.join(" · ")
+        ));
+    }
+    text
+}
+
+/// The graph with its cards, merges and branch settings, as one JSON document.
+fn graph_json(tree: &BranchTree) -> serde_json::Value {
+    let mut cards: Vec<_> = tree.cards.values().collect();
+    cards.sort_by(|a, b| a.block_id.as_str().cmp(b.block_id.as_str()));
+    let branches: Vec<_> = tree
+        .rows()
+        .into_iter()
+        .map(|row| {
+            let settings = tree.settings_of(&row);
+            serde_json::json!({
+                "branchId": row.branch.as_str(),
+                "name": row.name,
+                "threadId": row.thread_id,
+                "status": format!("{:?}", row.status).to_lowercase(),
+                "turns": row.turns,
+                "purpose": settings.purpose,
+                "summary": tree.branch_cards.get(&row.branch).map(|card| card.title.clone()),
+            })
+        })
+        .collect();
+    let merges: Vec<_> = tree
+        .merges
+        .iter()
+        .map(|merge| {
+            serde_json::json!({
+                "source": merge.source.as_str(),
+                "target": merge.target.as_str(),
+                "mode": merge.mode.as_str(),
+                "sourceHead": merge.source_head.as_ref().map(BlockId::as_str),
+                "mergeBlock": merge.merge_block.as_ref().map(BlockId::as_str),
+                "goal": merge.goal,
+                "code": merge.code,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "format": codex_context_graph::GRAPH_FORMAT,
+        "graphId": tree.graph_id,
+        "branches": branches,
+        "merges": merges,
+        "graph": tree.graph.export(),
+        "cards": cards,
+    })
 }
 
 /// The conversations to import: the named ones, or every saved one.
