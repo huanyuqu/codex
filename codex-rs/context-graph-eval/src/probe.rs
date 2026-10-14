@@ -191,6 +191,13 @@ pub struct GeneratedProbeFields {
 }
 
 /// Reads a JSON-lines file, or nothing when it does not exist.
+/// The turn at `share` of a session of `last_turn` turns, such as its middle for 0.5; at least
+/// the first turn.
+pub fn turn_at(last_turn: usize, share: f64) -> usize {
+    let turn = (share.clamp(0.0, 1.0) * last_turn as f64).ceil() as usize;
+    turn.clamp(1, last_turn.max(1))
+}
+
 pub fn read_jsonl<T: DeserializeOwned>(path: &Path) -> anyhow::Result<Vec<T>> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,

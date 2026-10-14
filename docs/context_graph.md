@@ -280,3 +280,11 @@ of the budget, so one run can compare, for example,
 blocks shown (the selection's recall), and the share of the earlier blocks
 shown that are support (its precision). `--valid-only` counts only probes that
 the oracle context answers and the recent turns alone do not.
+
+`probe-gen --at 0.5,1` asks probes halfway through each session and at its
+end, so that answers about earlier work are not overtaken by later turns.
+`speculate` replays sessions turn by turn: as each turn ends it recalls ahead
+of the next request, then recalls for that request, and records whether the
+recall made ahead would have served it and how much of the request's picks it
+shows. `speculate-report` summarizes how often turns start without screening,
+how long they would wait with `--wait-ms`, and what the screening costs.

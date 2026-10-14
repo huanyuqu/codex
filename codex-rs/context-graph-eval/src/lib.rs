@@ -6,5 +6,6 @@ pub mod probe;
 pub mod provider;
 pub mod responses;
 pub mod session;
+pub mod speculate;
 #[cfg(test)]
 mod test_support;

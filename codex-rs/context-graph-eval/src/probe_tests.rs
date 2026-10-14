@@ -72,3 +72,14 @@ fn json_lines_round_trip_and_a_missing_file_is_empty() {
         vec![probe.clone(), probe]
     );
 }
+
+#[test]
+fn probe_points_are_turns_at_shares_of_the_session() {
+    assert_eq!(turn_at(/*last_turn*/ 10, 0.5), 5);
+    assert_eq!(turn_at(/*last_turn*/ 9, 0.5), 5);
+    assert_eq!(turn_at(/*last_turn*/ 10, 1.0), 10);
+    // Out of range shares are clamped, and a session always has its first turn.
+    assert_eq!(turn_at(/*last_turn*/ 10, 0.0), 1);
+    assert_eq!(turn_at(/*last_turn*/ 10, 2.0), 10);
+    assert_eq!(turn_at(/*last_turn*/ 0, 0.5), 1);
+}

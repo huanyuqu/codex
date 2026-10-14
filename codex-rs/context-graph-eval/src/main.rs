@@ -27,11 +27,17 @@ use codex_context_graph_eval::probe::append_jsonl;
 use codex_context_graph_eval::probe::build_generation_prompt;
 use codex_context_graph_eval::probe::parse_generated_probes;
 use codex_context_graph_eval::probe::read_jsonl;
+use codex_context_graph_eval::probe::turn_at;
 use codex_context_graph_eval::provider::Endpoint;
 use codex_context_graph_eval::provider::resolve_endpoint;
 use codex_context_graph_eval::responses::ResponsesModel;
 use codex_context_graph_eval::session::load_session;
 use codex_context_graph_eval::session::replay;
+use codex_context_graph_eval::speculate::SpeculationResult;
+use codex_context_graph_eval::speculate::next_request_end;
+use codex_context_graph_eval::speculate::replay_turn;
+use codex_context_graph_eval::speculate::replay_turns;
+use codex_context_graph_eval::speculate::speculation_report;
 use codex_context_graph_store::BranchSnapshot;
 use codex_context_graph_store::IndexRequest;
 use codex_context_graph_store::IndexerConfig;
@@ -71,6 +77,12 @@ enum Command {
     ProbeRun(ProbeRunArgs),
     /// Summarize graded probe answers by condition and category.
     ProbeReport(ProbeReportArgs),
+    /// Replay rollouts turn by turn: recall as each turn ends, ahead of the next request, and
+    /// compare it with the recall of that request.
+    Speculate(SpeculateArgs),
+    /// Summarize replayed turns: how often the recall made ahead serves, and how long turns
+    /// would wait.
+    SpeculateReport(SpeculateReportArgs),
     /// Print the stored cards of a graph as JSON lines.
     Cards {
         #[arg(long)]
@@ -224,8 +236,13 @@ struct ProbeGenArgs {
     count: usize,
 
     /// Ask the probes after this turn. Defaults to the last turn.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "at")]
     turn: Option<usize>,
+
+    /// Ask probes at these points of each session, as shares of its turns, such as 0.5,1 for
+    /// halfway through and at the end; `count` probes at each point.
+    #[arg(long, value_delimiter = ',')]
+    at: Vec<f64>,
 
     /// JSON-lines file the probes are appended to.
     #[arg(long)]
@@ -278,6 +295,49 @@ struct ProbeRunArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct SpeculateArgs {
+    /// Rollouts to replay; index them first so that recall can use model cards.
+    #[arg(required = true)]
+    rollouts: Vec<PathBuf>,
+
+    /// Screening model.
+    #[arg(long)]
+    model: String,
+
+    /// Turns to replay per rollout, spread over the session.
+    #[arg(long, default_value_t = 8)]
+    turns: usize,
+
+    #[arg(long, default_value_t = 40_000)]
+    budget: u32,
+
+    #[arg(long, default_value_t = 2)]
+    recent_turns: usize,
+
+    /// Share of the budget, in percent, for summaries of lexical matches the screening did not
+    /// pick; 0 adds none.
+    #[arg(long, default_value_t = 15)]
+    lexical_share: u8,
+
+    /// JSON-lines file results are appended to; turns it has are skipped.
+    #[arg(long)]
+    out: PathBuf,
+
+    #[command(flatten)]
+    models: ModelArgs,
+}
+
+#[derive(Debug, clap::Args)]
+struct SpeculateReportArgs {
+    #[arg(long)]
+    results: PathBuf,
+
+    /// Longest a turn waits for the recall of its request, in milliseconds.
+    #[arg(long, default_value_t = 3_000)]
+    wait_ms: u64,
+}
+
+#[derive(Debug, clap::Args)]
 struct ProbeReportArgs {
     #[arg(long)]
     results: PathBuf,
@@ -309,6 +369,14 @@ async fn main() -> anyhow::Result<()> {
         Command::ProbeGen(probe_args) => probe_gen(&store, probe_args).await,
         Command::ProbeRun(run_args) => probe_run(&store, run_args).await,
         Command::ProbeReport(report_args) => probe_report(&report_args),
+        Command::Speculate(speculate_args) => speculate(&store, speculate_args).await,
+        Command::SpeculateReport(report_args) => {
+            let results: Vec<SpeculationResult> = read_jsonl(&report_args.results)?;
+            for line in speculation_report(&results, report_args.wait_ms) {
+                println!("{line}");
+            }
+            Ok(())
+        }
         Command::Cards { graph } => {
             for card in store.load_cards(&graph).await? {
                 println!("{}", serde_json::to_string(&card)?);
@@ -497,53 +565,121 @@ async fn probe_gen(store: &LocalContextGraphStore, args: ProbeGenArgs) -> anyhow
     let existing: Vec<Probe> = read_jsonl(&args.out)?;
     for path in &args.rollouts {
         let session = load_session(store, path).await?;
-        let history = session.history(args.turn);
-        let turn = history.last_turn();
-        let prompt = build_generation_prompt(&history, args.count);
-        let started = Instant::now();
-        let completion = match model.complete(&prompt.prompt).await {
-            Ok(completion) => completion,
-            Err(err) => {
-                eprintln!("{}: generation failed: {err:#}", session.graph_id);
-                continue;
-            }
+        let last_turn = session.history(/*until_turn*/ None).last_turn();
+        let points: Vec<Option<usize>> = if args.at.is_empty() {
+            vec![args.turn]
+        } else {
+            args.at
+                .iter()
+                .map(|share| Some(turn_at(last_turn, *share)))
+                .collect()
         };
-        let generated = match parse_generated_probes(&prompt, &history, &completion.text) {
-            Ok(generated) => generated,
-            Err(err) => {
-                eprintln!("{}: {err}", session.graph_id);
-                continue;
-            }
-        };
-        let prefix = format!("{}#{turn}#", session.graph_id);
-        let first = existing
-            .iter()
-            .filter(|probe| probe.id.starts_with(&prefix))
-            .count();
-        for (offset, fields) in generated.into_iter().enumerate() {
-            let probe = Probe {
-                id: format!("{prefix}{}", first + offset),
-                rollout: path.clone(),
-                graph_id: session.graph_id.clone(),
-                turn,
-                category: fields.category,
-                question: fields.question,
-                answer: fields.answer,
-                key_facts: fields.key_facts,
-                support: fields.support,
-                outdated: fields.outdated,
-                generator: args.model.clone(),
+        for point in points {
+            let history = session.history(point);
+            let turn = history.last_turn();
+            let prompt = build_generation_prompt(&history, args.count);
+            let started = Instant::now();
+            let completion = match model.complete(&prompt.prompt).await {
+                Ok(completion) => completion,
+                Err(err) => {
+                    eprintln!("{}: generation failed: {err:#}", session.graph_id);
+                    continue;
+                }
             };
-            append_jsonl(&args.out, &probe)?;
-            println!("{} [{}] {}", probe.id, probe.category, probe.question);
+            let generated = match parse_generated_probes(&prompt, &history, &completion.text) {
+                Ok(generated) => generated,
+                Err(err) => {
+                    eprintln!("{}: {err}", session.graph_id);
+                    continue;
+                }
+            };
+            let prefix = format!("{}#{turn}#", session.graph_id);
+            let first = existing
+                .iter()
+                .filter(|probe| probe.id.starts_with(&prefix))
+                .count();
+            for (offset, fields) in generated.into_iter().enumerate() {
+                let probe = Probe {
+                    id: format!("{prefix}{}", first + offset),
+                    rollout: path.clone(),
+                    graph_id: session.graph_id.clone(),
+                    turn,
+                    category: fields.category,
+                    question: fields.question,
+                    answer: fields.answer,
+                    key_facts: fields.key_facts,
+                    support: fields.support,
+                    outdated: fields.outdated,
+                    generator: args.model.clone(),
+                };
+                append_jsonl(&args.out, &probe)?;
+                println!("{} [{}] {}", probe.id, probe.category, probe.question);
+            }
+            eprintln!(
+                "{} at turn {turn}: {} input, {} output tokens, {:.1}s",
+                session.graph_id,
+                completion.input_tokens,
+                completion.output_tokens,
+                started.elapsed().as_secs_f64()
+            );
         }
-        eprintln!(
-            "{}: {} input, {} output tokens, {:.1}s",
-            session.graph_id,
-            completion.input_tokens,
-            completion.output_tokens,
-            started.elapsed().as_secs_f64()
-        );
+    }
+    Ok(())
+}
+
+async fn speculate(store: &LocalContextGraphStore, args: SpeculateArgs) -> anyhow::Result<()> {
+    let done: HashSet<(String, usize)> = read_jsonl::<SpeculationResult>(&args.out)?
+        .into_iter()
+        .map(|result| (result.graph_id, result.turn))
+        .collect();
+    let endpoint = args.models.endpoint()?;
+    let model = args.models.model(&endpoint, &args.model)?;
+    // The recall made ahead keeps one recent turn fewer: the next request makes the ended turn
+    // an earlier one.
+    let ahead = Recaller::new(
+        Arc::clone(&model),
+        /*read_model*/ None,
+        recall_config(
+            args.budget,
+            args.recent_turns.saturating_sub(1),
+            args.lexical_share,
+        ),
+    );
+    let request = Recaller::new(
+        model,
+        /*read_model*/ None,
+        recall_config(args.budget, args.recent_turns, args.lexical_share),
+    );
+    for path in &args.rollouts {
+        let session = load_session(store, path).await?;
+        let full = session.history(/*until_turn*/ None);
+        for turn in replay_turns(&full, args.recent_turns, args.turns) {
+            if done.contains(&(session.graph_id.clone(), turn)) {
+                continue;
+            }
+            let Some(end) = next_request_end(&full, turn) else {
+                continue;
+            };
+            let ended = session.history(Some(turn));
+            let next = session.history_until_block(end);
+            match replay_turn(&session.graph_id, turn, &ended, &next, &ahead, &request).await {
+                Ok(result) => {
+                    append_jsonl(&args.out, &result)?;
+                    println!(
+                        "{} turn {turn}: {}, ahead {} ms, request {} ms",
+                        session.graph_id,
+                        if result.served {
+                            "served"
+                        } else {
+                            "not served"
+                        },
+                        result.speculative.latency_ms,
+                        result.request.latency_ms
+                    );
+                }
+                Err(err) => eprintln!("{} turn {turn}: {err:#}", session.graph_id),
+            }
+        }
     }
     Ok(())
 }
