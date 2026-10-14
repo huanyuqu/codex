@@ -72,8 +72,21 @@ pub fn build_screen_prompt(
     recent_start: usize,
     limits: ScreenLimits,
 ) -> ScreenPrompt {
+    build_screen_prompt_within(history, question, recent_start, limits, None)
+}
+
+/// Like [`build_screen_prompt`], with the catalog limited to the history positions in `within`
+/// when it is set, such as the blocks of the episodes a first screening chose.
+pub fn build_screen_prompt_within(
+    history: &History<'_>,
+    question: &str,
+    recent_start: usize,
+    limits: ScreenLimits,
+    within: Option<&HashSet<usize>>,
+) -> ScreenPrompt {
     let recallable: Vec<usize> = (0..history.len())
         .filter(|index| history.recallable(*index))
+        .filter(|index| within.is_none_or(|within| within.contains(index)))
         .collect();
     let lines: Vec<String> = recallable
         .iter()
@@ -179,7 +192,7 @@ fn prefilter(
 }
 
 /// The catalog entry of a card, without its label.
-fn card_lines(card: &BlockCard, limits: ScreenLimits) -> String {
+pub(crate) fn card_lines(card: &BlockCard, limits: ScreenLimits) -> String {
     let mut line = format!("[{}] {}", kind_name(card.kind), card.title.trim());
     if card.outcome == Some(Outcome::Failure) {
         line.push_str(" (failed)");
@@ -247,8 +260,9 @@ fn answer_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["selected", "uncertain"],
+        "required": ["selected", "uncertain", "confidence"],
         "properties": {
+            "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
             "selected": {
                 "type": "array",
                 "items": {
@@ -267,6 +281,18 @@ fn answer_schema() -> Value {
     })
 }
 
+/// How sure a screening was of its choice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    High,
+    #[default]
+    Medium,
+    /// The request refers to something the cards do not show, chains several earlier steps,
+    /// or the cards are too vague to judge.
+    Low,
+}
+
 /// The blocks a screening answer picked, most important first, and the blocks it could not
 /// decide from their cards.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,6 +300,15 @@ pub struct ScreenAnswer {
     pub picks: Vec<Pick>,
     /// History positions of blocks to read before deciding.
     pub uncertain: Vec<usize>,
+    pub confidence: Confidence,
+}
+
+impl ScreenAnswer {
+    /// Whether a stronger model should screen again: the screening said it was unsure, or it
+    /// left as many blocks undecided as it could.
+    pub fn unsure(&self, max_uncertain: usize) -> bool {
+        self.confidence == Confidence::Low || self.uncertain.len() >= max_uncertain.max(1)
+    }
 }
 
 #[derive(Deserialize)]
@@ -282,6 +317,8 @@ struct Answer {
     selected: Vec<Selected>,
     #[serde(default)]
     uncertain: Vec<String>,
+    #[serde(default)]
+    confidence: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -328,7 +365,124 @@ pub fn parse_screen_answer(prompt: &ScreenPrompt, text: &str) -> Result<ScreenAn
         .filter(|index| seen.insert(*index))
         .take(prompt.max_uncertain)
         .collect();
-    Ok(ScreenAnswer { picks, uncertain })
+    let confidence = match answer.confidence.as_deref().map(str::trim) {
+        Some("high") => Confidence::High,
+        Some("low") => Confidence::Low,
+        _ => Confidence::Medium,
+    };
+    Ok(ScreenAnswer {
+        picks,
+        uncertain,
+        confidence,
+    })
+}
+
+const EPISODE_INSTRUCTIONS: &str = include_str!("../prompts/episode_instructions.md");
+
+/// A first screening over the episodes of a history too long for one catalog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpisodePrompt {
+    pub prompt: ModelPrompt,
+    /// The episode each label `E1`, `E2`, … names, by position in the history's episodes.
+    pub episodes: Vec<usize>,
+}
+
+/// Renders the episode screening for `question`, or `None` when the history has no episodes
+/// before `recent_start`.
+pub fn build_episode_prompt(
+    history: &History<'_>,
+    question: &str,
+    recent_start: usize,
+) -> Option<EpisodePrompt> {
+    let first_recent_turn = (recent_start < history.len()).then(|| history.turn(recent_start));
+    let episodes: Vec<usize> = history
+        .episodes()
+        .iter()
+        .enumerate()
+        .filter(|(_, span)| first_recent_turn.is_none_or(|turn| span.first_turn < turn))
+        .map(|(position, _)| position)
+        .collect();
+    if episodes.is_empty() {
+        return None;
+    }
+    let mut input = String::from("## Episodes\n");
+    for (label, position) in episodes.iter().enumerate() {
+        let span = &history.episodes()[*position];
+        let turns = if span.first_turn == span.last_turn {
+            format!("turn {}", span.first_turn)
+        } else {
+            format!("turns {}-{}", span.first_turn, span.last_turn)
+        };
+        let summary = span
+            .summary
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        input.push_str(&format!(
+            "E{} ({turns}) {} — {}\n",
+            label + 1,
+            span.title.trim(),
+            truncate(&summary, 400)
+        ));
+    }
+    input.push_str("\n## Request\n");
+    input.push_str(question.trim());
+    input.push('\n');
+    Some(EpisodePrompt {
+        prompt: ModelPrompt {
+            instructions: EPISODE_INSTRUCTIONS.to_string(),
+            input,
+            schema_name: "episode_selection",
+            schema: json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["episodes"],
+                "properties": {
+                    "episodes": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+        },
+        episodes,
+    })
+}
+
+#[derive(Deserialize)]
+struct EpisodeAnswer {
+    #[serde(default)]
+    episodes: Vec<String>,
+}
+
+/// The history positions a second screening chooses from after the episode screening answered
+/// `text`: the blocks of the chosen episodes, of turns no episode covers, and every user
+/// message, which outlines the session.
+pub fn parse_episode_answer(
+    history: &History<'_>,
+    prompt: &EpisodePrompt,
+    text: &str,
+) -> Result<HashSet<usize>, AnswerError> {
+    let answer: EpisodeAnswer = parse_answer(text)?;
+    let chosen: Vec<&crate::history::EpisodeSpan> = answer
+        .episodes
+        .iter()
+        .filter_map(|label| label_position(label, 'E', prompt.episodes.len()))
+        .map(|position| &history.episodes()[prompt.episodes[position]])
+        .collect();
+    let covered = |turn: usize| {
+        history
+            .episodes()
+            .iter()
+            .any(|span| span.first_turn <= turn && turn <= span.last_turn)
+    };
+    Ok((0..history.len())
+        .filter(|index| {
+            let turn = history.turn(*index);
+            history.card(*index).kind == BlockKind::UserMessage
+                || !covered(turn)
+                || chosen
+                    .iter()
+                    .any(|span| span.first_turn <= turn && turn <= span.last_turn)
+        })
+        .collect())
 }
 
 #[cfg(test)]

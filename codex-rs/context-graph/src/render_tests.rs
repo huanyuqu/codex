@@ -44,6 +44,11 @@ fn renders_one_node_per_branch_and_an_edge_per_fork() {
         branch_mermaid(&graph),
         "flowchart LR\n    b0[\"main · 3 blocks\"]\n    b1[\"option-b · 1 blocks\"]\n    b0 -- \"after assistant_message\" --> b1\n"
     );
+    let (main, option_b) = (BranchId::new("main"), BranchId::new("option-b"));
+    assert!(
+        branch_mermaid_with_merges(&graph, &[(&option_b, &main, "fold")])
+            .ends_with("    b1 -. \"fold\" .-> b0\n")
+    );
     assert_eq!(
         kind_counts(&graph),
         BTreeMap::from([

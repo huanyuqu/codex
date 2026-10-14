@@ -165,3 +165,78 @@ fn folding_summarizes_what_the_branch_did_after_it_diverged() {
     .unwrap_or_else(|err| panic!("fold: {err}"));
     assert_eq!(back.map(|fold| fold.turns), Some(1));
 }
+
+#[test]
+fn turns_list_inherited_and_own_work() {
+    let (graph, cards) = forked_graph();
+    let turns = branch_turns(&graph, &cards, &BranchId::new("jitter"))
+        .unwrap_or_else(|err| panic!("turns: {err}"));
+    let summary: Vec<(usize, bool, &str, Vec<&str>)> = turns
+        .iter()
+        .map(|turn| {
+            (
+                turn.number,
+                turn.inherited,
+                turn.title.as_str(),
+                turn.blocks
+                    .iter()
+                    .map(|block| block.title.as_str())
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (1, true, "add retries", vec!["add retries", "retries added"]),
+            (
+                2,
+                false,
+                "try jitter",
+                vec!["try jitter", "$ cargo test jitter", "jitter works"]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn search_finds_blocks_on_every_branch_with_their_turn() {
+    let (graph, cards) = forked_graph();
+    let hits = search_graph(&graph, &cards, "jitter", 10);
+    let places: Vec<(&str, &str, usize)> = hits
+        .iter()
+        .map(|hit| (hit.branch.as_str(), hit.block.id.as_str(), hit.turn))
+        .collect();
+    assert!(places.contains(&("jitter", "t2", 2)), "{places:?}");
+    assert!(places.contains(&("jitter", "a2", 2)), "{places:?}");
+    assert!(places.iter().all(|place| place.0 == "jitter"), "{places:?}");
+
+    let hits = search_graph(&graph, &cards, "timeout", 10);
+    assert_eq!(
+        hits.first().map(|hit| (hit.branch.as_str(), hit.turn)),
+        Some(("main", 2))
+    );
+}
+
+#[test]
+fn boundary_notes_say_what_the_branch_is_for() {
+    let note = branch_boundary_note(
+        "try-sqlite",
+        "compare SQLite with the file store.",
+        Some("main"),
+    );
+    let codex_protocol::models::ResponseItem::Message { role, content, .. } = note else {
+        panic!("not a message");
+    };
+    assert_eq!(role, "developer");
+    assert_eq!(
+        content,
+        vec![codex_protocol::models::ContentItem::InputText {
+            text: "This chat is branch \"try-sqlite\" of the conversation, forked from \
+                   \"main\". The branch is for: compare SQLite with the file store. The history \
+                   before the fork is shared background; requests in it were already handled \
+                   unless the user raises them again. Work toward the branch's purpose."
+                .to_string()
+        }]
+    );
+}

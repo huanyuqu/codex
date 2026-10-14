@@ -245,6 +245,185 @@ pub fn fold_summary(
     }))
 }
 
+/// One block of a turn, for browsing a branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockRow {
+    pub id: BlockId,
+    pub kind: BlockKind,
+    /// The card's title, or the kind of block while it has no card.
+    pub title: String,
+    pub tokens: u32,
+}
+
+/// One turn of a branch's history, for browsing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnRow {
+    /// Position of the turn in the branch's whole history, counted from 1; 0 for blocks before
+    /// the first request.
+    pub number: usize,
+    /// The turn's ID, when its blocks recorded one.
+    pub turn_id: Option<String>,
+    /// Whether the branch inherited the turn from the branch it was forked from.
+    pub inherited: bool,
+    /// The request that started the turn.
+    pub title: String,
+    pub blocks: Vec<BlockRow>,
+}
+
+/// The turns of `branch`'s whole history, oldest first: each user message starts a turn.
+/// Harness-injected context is left out.
+pub fn branch_turns(
+    graph: &ContextGraph,
+    cards: &HashMap<BlockId, BlockCard>,
+    branch: &BranchId,
+) -> Result<Vec<TurnRow>, GraphError> {
+    let branch = graph
+        .branch(branch)
+        .ok_or_else(|| GraphError::UnknownBranch(branch.clone()))?;
+    let Some(head) = &branch.head else {
+        return Ok(Vec::new());
+    };
+    let path = graph.primary_path(head)?;
+    let inherited_until = branch
+        .fork_point
+        .as_ref()
+        .and_then(|fork_point| path.iter().position(|id| id == fork_point));
+    let mut turns: Vec<TurnRow> = Vec::new();
+    for (position, id) in path.iter().enumerate() {
+        let Some(node) = graph.node(id) else {
+            continue;
+        };
+        let kind = node.block.kind;
+        if kind == BlockKind::ContextFragment {
+            continue;
+        }
+        let card = cards.get(id);
+        let title = card.map_or_else(
+            || crate::render::kind_name(kind).to_string(),
+            |card| card.title.trim().to_string(),
+        );
+        let tokens = card.map_or_else(
+            || u32::try_from(node.block.approx_bytes / 4).unwrap_or(u32::MAX),
+            |card| card.tokens,
+        );
+        let inherited = inherited_until.is_some_and(|until| position <= until);
+        if kind == BlockKind::UserMessage || turns.is_empty() {
+            let number = turns.last().map_or(0, |turn| turn.number)
+                + usize::from(kind == BlockKind::UserMessage);
+            turns.push(TurnRow {
+                number,
+                turn_id: None,
+                inherited,
+                title: if kind == BlockKind::UserMessage {
+                    title.clone()
+                } else {
+                    "(before the first request)".to_string()
+                },
+                blocks: Vec::new(),
+            });
+        }
+        if let Some(turn) = turns.last_mut() {
+            if turn.turn_id.is_none() {
+                turn.turn_id.clone_from(&node.block.turn_id);
+            }
+            turn.blocks.push(BlockRow {
+                id: id.clone(),
+                kind,
+                title,
+                tokens,
+            });
+        }
+    }
+    Ok(turns)
+}
+
+/// A block whose card matches a search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    /// The branch that recorded the block.
+    pub branch: BranchId,
+    pub block: BlockRow,
+    /// The turn of that branch the block belongs to, counted from 1.
+    pub turn: usize,
+    pub summary: String,
+    pub score: f32,
+}
+
+/// The blocks of every branch whose cards best match `query`, best first, at most `limit`.
+pub fn search_graph(
+    graph: &ContextGraph,
+    cards: &HashMap<BlockId, BlockCard>,
+    query: &str,
+    limit: usize,
+) -> Vec<SearchHit> {
+    // Where each block was recorded: its own branch and turn there.
+    let mut places: HashMap<BlockId, (BranchId, usize)> = HashMap::new();
+    for branch in graph.branches() {
+        let Ok(turns) = branch_turns(graph, cards, &branch.id) else {
+            continue;
+        };
+        for turn in turns.iter().filter(|turn| !turn.inherited) {
+            for block in &turn.blocks {
+                places
+                    .entry(block.id.clone())
+                    .or_insert_with(|| (branch.id.clone(), turn.number));
+            }
+        }
+    }
+    let candidates: Vec<&BlockCard> = graph
+        .nodes()
+        .filter(|node| node.block.kind != BlockKind::ContextFragment)
+        .filter_map(|node| cards.get(&node.block.id))
+        .collect();
+    crate::search::rank_cards(&candidates, query)
+        .into_iter()
+        .filter_map(|(index, score)| {
+            let card = candidates[index];
+            let (branch, turn) = places.get(&card.block_id)?.clone();
+            Some(SearchHit {
+                branch,
+                block: BlockRow {
+                    id: card.block_id.clone(),
+                    kind: card.kind,
+                    title: card.title.trim().to_string(),
+                    tokens: card.tokens,
+                },
+                turn,
+                summary: card.summary.trim().to_string(),
+                score,
+            })
+        })
+        .take(limit)
+        .collect()
+}
+
+/// The note that tells a branch's chat what the branch is for: the boundary between the history
+/// it inherited and its own work.
+pub fn branch_boundary_note(
+    name: &str,
+    purpose: &str,
+    parent: Option<&str>,
+) -> codex_protocol::models::ResponseItem {
+    let forked = parent
+        .map(|parent| format!(", forked from \"{parent}\""))
+        .unwrap_or_default();
+    let text = format!(
+        "This chat is branch \"{name}\" of the conversation{forked}. The branch is for: {}. \
+         The history before the fork is shared background; requests in it were already handled \
+         unless the user raises them again. Work toward the branch's purpose.",
+        purpose.trim().trim_end_matches('.')
+    );
+    codex_protocol::models::ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
+        id: None,
+        role: "developer".to_string(),
+        content: vec![codex_protocol::models::ContentItem::InputText { text }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
 /// A card's title and summary as one line.
 fn card_text(card: &BlockCard) -> String {
     let summary = card

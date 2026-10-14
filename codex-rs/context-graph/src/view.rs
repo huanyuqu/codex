@@ -55,6 +55,15 @@ pub enum Presentation {
 }
 
 impl Presentation {
+    /// The name of the presentation, as records show it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Excerpt { .. } => "excerpt",
+            Self::Summary => "summary",
+        }
+    }
+
     fn detail(&self) -> u8 {
         match self {
             Self::Full => 3,
@@ -78,6 +87,19 @@ pub enum Reason {
     Dependency,
     /// It made a shown block outdated.
     Successor,
+}
+
+impl Reason {
+    /// The name of the reason, as records show it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Recent => "recent",
+            Self::TaskStart => "task_start",
+            Self::Selected => "selected",
+            Self::Dependency => "dependency",
+            Self::Successor => "successor",
+        }
+    }
 }
 
 /// A block the selector picked, with how much of it to show.

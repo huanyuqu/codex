@@ -29,6 +29,14 @@ pub fn kind_counts(graph: &ContextGraph) -> BTreeMap<String, usize> {
 
 /// Mermaid flowchart with one node per branch and one edge per fork.
 pub fn branch_mermaid(graph: &ContextGraph) -> String {
+    branch_mermaid_with_merges(graph, &[])
+}
+
+/// A merge to draw: the source branch, the target branch and how it was merged.
+pub type MergeEdge<'a> = (&'a BranchId, &'a BranchId, &'a str);
+
+/// Mermaid flowchart with one node per branch, one edge per fork and one dotted edge per merge.
+pub fn branch_mermaid_with_merges(graph: &ContextGraph, merges: &[MergeEdge<'_>]) -> String {
     let owned = owned_block_counts(graph);
     let branches: Vec<_> = graph.branches().collect();
     let node_id = |id: &BranchId| {
@@ -61,6 +69,11 @@ pub fn branch_mermaid(graph: &ContextGraph) -> String {
             None => {
                 let _ = writeln!(out, "    {parent} --> {child}");
             }
+        }
+    }
+    for (source, target, mode) in merges {
+        if let (Some(source), Some(target)) = (node_id(source), node_id(target)) {
+            let _ = writeln!(out, "    {source} -. \"{}\" .-> {target}", escape(mode));
         }
     }
     out

@@ -24,9 +24,11 @@ pub mod prompt;
 pub mod read;
 pub mod render;
 mod replay;
+pub mod score;
 pub mod screen;
 pub mod search;
 mod segmenter;
+pub mod synthesis;
 #[cfg(test)]
 mod test_support;
 pub mod text;
