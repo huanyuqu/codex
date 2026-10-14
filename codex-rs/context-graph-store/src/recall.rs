@@ -1,11 +1,17 @@
 //! Recall: choosing, for one request, the blocks of a branch's history its model should see.
 //!
 //! A screening model reads the cards of the whole history and picks blocks, most important
-//! first, with how much of each to show, and names the blocks its cards cannot decide. A reading
-//! model then reads those blocks, and large picked blocks, in full, and decides for each whether
-//! to show it whole, an excerpt or a summary, or to leave it out. The picks become a
-//! [`ContextView`] that fits the token budget.
+//! first, with how much of each to show, and names the blocks its cards cannot decide. A history
+//! too long for one catalog is first narrowed to the episodes the request needs. When the
+//! screening is unsure, a stronger model screens again. A reading model then reads the undecided
+//! blocks, and large picked blocks, in full, and decides for each whether to show it whole, an
+//! excerpt or a summary, or to leave it out. The picks become a [`ContextView`] that fits the
+//! token budget.
+//!
+//! Instead of one listwise screening, a [`RelevanceScorer`] can judge every card on its own
+//! (pointwise), or narrow the candidates down for the listwise screening (cascade).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -13,8 +19,16 @@ use codex_context_graph::history::History;
 use codex_context_graph::read::ReadLimits;
 use codex_context_graph::read::build_read_prompts;
 use codex_context_graph::read::parse_read_answer;
+use codex_context_graph::score::candidate_documents;
+use codex_context_graph::score::picks_from_scores;
+use codex_context_graph::score::score_candidates;
+use codex_context_graph::score::top_candidates;
+use codex_context_graph::screen::ScreenAnswer;
 use codex_context_graph::screen::ScreenLimits;
-use codex_context_graph::screen::build_screen_prompt;
+use codex_context_graph::screen::ScreenPrompt;
+use codex_context_graph::screen::build_episode_prompt;
+use codex_context_graph::screen::build_screen_prompt_within;
+use codex_context_graph::screen::parse_episode_answer;
 use codex_context_graph::screen::parse_screen_answer;
 use codex_context_graph::view::ContextView;
 use codex_context_graph::view::Pick;
@@ -27,6 +41,20 @@ use serde::Serialize;
 
 use crate::model::ModelCompletion;
 use crate::model::ShadowModel;
+use crate::scorer::RelevanceScorer;
+
+/// How recall screens the cards.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenStrategy {
+    /// One model reads the catalog of every card and chooses.
+    #[default]
+    Listwise,
+    /// A scorer judges each card on its own.
+    Pointwise,
+    /// A scorer narrows the cards down, then a model chooses among the best.
+    Cascade,
+}
 
 /// How recall screens, reads and budgets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +65,9 @@ pub struct RecallConfig {
     /// Picked blocks shown in full that are larger than this are read, so that an excerpt may
     /// replace them.
     pub read_over_tokens: u32,
+    pub strategy: ScreenStrategy,
+    /// Cards a cascade keeps for the listwise screening.
+    pub cascade_candidates: usize,
 }
 
 impl Default for RecallConfig {
@@ -46,6 +77,8 @@ impl Default for RecallConfig {
             screen: ScreenLimits::default(),
             read: ReadLimits::default(),
             read_over_tokens: 3_000,
+            strategy: ScreenStrategy::Listwise,
+            cascade_candidates: 60,
         }
     }
 }
@@ -94,6 +127,27 @@ pub struct RecallStats {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reads: Vec<ModelCall>,
     pub latency_ms: u64,
+    /// The screening that chose episodes before blocks, for histories too long for one
+    /// catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode_screen: Option<ModelCall>,
+    /// The stronger model's screening, when the first one was unsure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<ModelCall>,
+    /// The scorer that judged the cards, for pointwise and cascade screening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scorer: Option<String>,
+    /// Cards the scorer judged.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub scored: usize,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes the field by reference"
+)]
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 /// The view a recall built, with its stats.
@@ -107,6 +161,8 @@ pub struct Recall {
 pub struct Recaller {
     screen_model: Arc<dyn ShadowModel>,
     read_model: Option<Arc<dyn ShadowModel>>,
+    escalate_model: Option<Arc<dyn ShadowModel>>,
+    scorer: Option<Arc<dyn RelevanceScorer>>,
     config: RecallConfig,
 }
 
@@ -121,8 +177,23 @@ impl Recaller {
         Self {
             screen_model,
             read_model,
+            escalate_model: None,
+            scorer: None,
             config,
         }
+    }
+
+    /// Screens again with `model` when the first screening is unsure.
+    pub fn with_escalation(mut self, model: Option<Arc<dyn ShadowModel>>) -> Self {
+        self.escalate_model = model;
+        self
+    }
+
+    /// Judges cards with `scorer` for pointwise and cascade screening; without one, those
+    /// strategies screen listwise.
+    pub fn with_scorer(mut self, scorer: Option<Arc<dyn RelevanceScorer>>) -> Self {
+        self.scorer = scorer;
+        self
     }
 
     pub fn config(&self) -> &RecallConfig {
@@ -134,20 +205,41 @@ impl Recaller {
     pub async fn recall(&self, history: &History<'_>, question: &str) -> anyhow::Result<Recall> {
         let started = Instant::now();
         let recent_start = history.recent_start(self.config.view.recent_turns);
-        let prompt = build_screen_prompt(history, question, recent_start, self.config.screen);
-        let mut stats = RecallStats {
-            candidates: prompt.candidates.len(),
-            prefiltered: prompt.prefiltered,
-            catalog_tokens: prompt.catalog_tokens,
-            ..RecallStats::default()
+        let mut stats = RecallStats::default();
+        let answer = match (self.config.strategy, &self.scorer) {
+            (ScreenStrategy::Pointwise, Some(scorer)) => {
+                let candidates = score_candidates(history, recent_start);
+                let scores = self
+                    .score(scorer.as_ref(), history, question, &candidates, &mut stats)
+                    .await?;
+                let (picks, uncertain) =
+                    picks_from_scores(&candidates, &scores, self.config.screen.max_uncertain);
+                ScreenAnswer {
+                    picks,
+                    uncertain,
+                    confidence: Default::default(),
+                }
+            }
+            (ScreenStrategy::Cascade, Some(scorer)) => {
+                let candidates = score_candidates(history, recent_start);
+                let scores = self
+                    .score(scorer.as_ref(), history, question, &candidates, &mut stats)
+                    .await?;
+                let within: HashSet<usize> =
+                    top_candidates(&candidates, &scores, self.config.cascade_candidates)
+                        .into_iter()
+                        .collect();
+                self.screen(history, question, recent_start, Some(&within), &mut stats)
+                    .await?
+            }
+            _ => {
+                let within = self
+                    .narrow_to_episodes(history, question, recent_start, &mut stats)
+                    .await;
+                self.screen(history, question, recent_start, within.as_ref(), &mut stats)
+                    .await?
+            }
         };
-
-        let screen_started = Instant::now();
-        let completion = self.screen_model.complete(&prompt.prompt).await?;
-        stats.screen = Some(
-            ModelCall::new(self.screen_model.as_ref(), screen_started).with_usage(&completion),
-        );
-        let answer = parse_screen_answer(&prompt, &completion.text)?;
         let mut picks = answer.picks;
         stats.picked = picks.len();
         stats.uncertain = answer.uncertain.len();
@@ -181,6 +273,124 @@ impl Recaller {
         let view = plan_view(history, &picks, self.config.view);
         stats.latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         Ok(Recall { view, stats })
+    }
+
+    /// Scores `candidates` with `scorer`, recording what it judged.
+    async fn score(
+        &self,
+        scorer: &dyn RelevanceScorer,
+        history: &History<'_>,
+        question: &str,
+        candidates: &[usize],
+        stats: &mut RecallStats,
+    ) -> anyhow::Result<Vec<f32>> {
+        stats.scorer = Some(scorer.name().to_string());
+        stats.scored = candidates.len();
+        stats.candidates = candidates.len();
+        let documents = candidate_documents(history, candidates);
+        let scores = scorer.score(question, &documents).await?;
+        anyhow::ensure!(
+            scores.len() == candidates.len(),
+            "the scorer answered for {} of {} cards",
+            scores.len(),
+            candidates.len()
+        );
+        Ok(scores)
+    }
+
+    /// The blocks of the episodes the request needs, when the whole history is too long for one
+    /// catalog and has episodes; `None` to screen everything. A failed episode screening
+    /// screens everything.
+    async fn narrow_to_episodes(
+        &self,
+        history: &History<'_>,
+        question: &str,
+        recent_start: usize,
+        stats: &mut RecallStats,
+    ) -> Option<HashSet<usize>> {
+        let whole = build_screen_prompt_within(
+            history,
+            question,
+            recent_start,
+            self.config.screen,
+            /*within*/ None,
+        );
+        if !whole.prefiltered {
+            return None;
+        }
+        let prompt = build_episode_prompt(history, question, recent_start)?;
+        let started = Instant::now();
+        let completion = self.screen_model.complete(&prompt.prompt).await;
+        let call = ModelCall::new(self.screen_model.as_ref(), started);
+        match completion.and_then(|completion| {
+            let within = parse_episode_answer(history, &prompt, &completion.text)?;
+            Ok((completion, within))
+        }) {
+            Ok((completion, within)) => {
+                stats.episode_screen = Some(call.with_usage(&completion));
+                Some(within)
+            }
+            Err(err) => {
+                stats.episode_screen = Some(ModelCall {
+                    error: Some(format!("{err:#}")),
+                    ..call
+                });
+                None
+            }
+        }
+    }
+
+    /// Screens the catalog, limited to `within` when it is set, and screens again with the
+    /// stronger model when the answer is unsure.
+    async fn screen(
+        &self,
+        history: &History<'_>,
+        question: &str,
+        recent_start: usize,
+        within: Option<&HashSet<usize>>,
+        stats: &mut RecallStats,
+    ) -> anyhow::Result<ScreenAnswer> {
+        let prompt =
+            build_screen_prompt_within(history, question, recent_start, self.config.screen, within);
+        stats.candidates = prompt.candidates.len();
+        stats.prefiltered = prompt.prefiltered || within.is_some();
+        stats.catalog_tokens = prompt.catalog_tokens;
+        let (answer, call) = self
+            .screen_with(self.screen_model.as_ref(), &prompt)
+            .await?;
+        stats.screen = Some(call);
+        let Some(escalate_model) = &self.escalate_model else {
+            return Ok(answer);
+        };
+        if !answer.unsure(prompt.max_uncertain) {
+            return Ok(answer);
+        }
+        // The stronger model reads the same prompt, so it can reuse the cached prefix.
+        match self.screen_with(escalate_model.as_ref(), &prompt).await {
+            Ok((escalated, call)) => {
+                stats.escalation = Some(call);
+                Ok(escalated)
+            }
+            Err(err) => {
+                stats.escalation = Some(ModelCall {
+                    error: Some(format!("{err:#}")),
+                    ..ModelCall::new(escalate_model.as_ref(), Instant::now())
+                });
+                Ok(answer)
+            }
+        }
+    }
+
+    async fn screen_with(
+        &self,
+        model: &dyn ShadowModel,
+        prompt: &ScreenPrompt,
+    ) -> anyhow::Result<(ScreenAnswer, ModelCall)> {
+        let started = Instant::now();
+        let completion = model.complete(&prompt.prompt).await?;
+        let call = ModelCall::new(model, started).with_usage(&completion);
+        let answer = parse_screen_answer(prompt, &completion.text)?;
+        Ok((answer, call))
     }
 
     /// Reads `blocks` in parallel requests and returns each decided block with its decision.

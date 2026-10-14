@@ -56,7 +56,7 @@ const JOIN_BLOCKS: &str =
     "UPDATE OR IGNORE cg_blocks SET graph_id = ?, seq = seq + ? WHERE graph_id = ?";
 
 /// Moves the other rows of one graph into another, keeping the rows the target already has.
-const JOIN_GRAPH: [&str; 9] = [
+const JOIN_GRAPH: [&str; 10] = [
     "UPDATE OR IGNORE cg_branches SET graph_id = ? WHERE graph_id = ?",
     "UPDATE OR IGNORE cg_edges SET graph_id = ? WHERE graph_id = ?",
     "UPDATE OR IGNORE cg_cards SET graph_id = ? WHERE graph_id = ?",
@@ -64,6 +64,7 @@ const JOIN_GRAPH: [&str; 9] = [
     "UPDATE cg_index_requests SET graph_id = ? WHERE graph_id = ?",
     "UPDATE cg_views SET graph_id = ? WHERE graph_id = ?",
     "UPDATE cg_merges SET graph_id = ? WHERE graph_id = ?",
+    "UPDATE cg_recall_feedback SET graph_id = ? WHERE graph_id = ?",
     "UPDATE OR IGNORE cg_episode_cards SET graph_id = ? WHERE graph_id = ?",
     "UPDATE OR IGNORE cg_branch_cards SET graph_id = ? WHERE graph_id = ?",
 ];
@@ -275,6 +276,8 @@ impl LocalContextGraphStore {
                         target_head: None,
                         merge_block: merge.block.clone(),
                         mode: merge.mode,
+                        goal: None,
+                        code: None,
                     },
                 )
                 .await?;

@@ -27,6 +27,7 @@ codex-state = { workspace = true }
 codex-thread-store = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 futures = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls-tls", "rustls-tls-native-roots"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
@@ -38,4 +39,5 @@ tracing = { workspace = true }
 [dev-dependencies]
 codex-history = { workspace = true }
 pretty_assertions = { workspace = true }
+wiremock = { workspace = true }
 tempfile = { workspace = true }

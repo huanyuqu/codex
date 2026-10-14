@@ -560,3 +560,40 @@ async fn a_resumed_thread_keeps_recording_into_its_branch() {
         .and_then(|branch| branch.head.clone());
     assert_eq!(head, Some(BlockId::for_item_key("msg_a2")));
 }
+
+#[tokio::test]
+async fn an_agent_spawned_without_the_history_joins_its_parents_graph() {
+    let dir = TempDir::new().unwrap_or_else(|err| panic!("temp dir: {err}"));
+    let store = LocalContextGraphStore::open(&sqlite_config(&dir))
+        .await
+        .unwrap_or_else(|err| panic!("open store: {err}"));
+    let parent = ThreadId::new().to_string();
+    let child = ThreadId::new().to_string();
+
+    // Before the parent records, the agent starts a graph of its own.
+    let membership = store
+        .membership_for_spawned_thread(&child, &parent, Some("Ada"))
+        .await
+        .unwrap_or_else(|err| panic!("membership: {err}"));
+    assert_eq!(membership, GraphMembership::root(&child));
+
+    let mut branch = Branch::new(BranchId::for_thread(&parent), "main");
+    branch.thread_id = Some(parent.clone());
+    store
+        .upsert_branch(&parent, &branch)
+        .await
+        .unwrap_or_else(|err| panic!("upsert: {err}"));
+    let membership = store
+        .membership_for_spawned_thread(&child, &parent, Some("Ada"))
+        .await
+        .unwrap_or_else(|err| panic!("membership: {err}"));
+    assert_eq!(membership.graph_id, parent);
+    assert_eq!(membership.name, "agent-Ada");
+    assert_eq!(membership.parent, Some(BranchId::for_thread(&parent)));
+
+    let unnamed = store
+        .membership_for_spawned_thread(&child, &parent, None)
+        .await
+        .unwrap_or_else(|err| panic!("membership: {err}"));
+    assert!(unnamed.name.starts_with("agent-"), "{}", unnamed.name);
+}

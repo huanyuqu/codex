@@ -39,6 +39,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::LocalContextGraphStore;
+use crate::indexer::CardsListener;
 use crate::indexer::IndexerConfig;
 use crate::indexer::ShadowIndexer;
 use crate::merges::MergeMode;
@@ -94,6 +95,8 @@ pub struct LiveIndexing {
     /// Model that describes blocks; without one, blocks only get extracted cards.
     pub model: Option<Arc<dyn ShadowModel>>,
     pub config: IndexerConfig,
+    /// Told when blocks get model cards.
+    pub on_cards: Option<CardsListener>,
 }
 
 enum StoreWrite {
@@ -227,6 +230,45 @@ impl LocalContextGraphStore {
         }
         Ok(GraphMembership::root(thread_id))
     }
+
+    /// Where `thread_id`, which an agent of thread `parent` spawned without the conversation's
+    /// history, records: a branch of its parent's graph that shares no history with it, named
+    /// after the agent; or a graph of its own when the parent is not recorded.
+    pub async fn membership_for_spawned_thread(
+        &self,
+        thread_id: &str,
+        parent: &str,
+        nickname: Option<&str>,
+    ) -> anyhow::Result<GraphMembership> {
+        if self.branch_of_thread(thread_id).await?.is_some() {
+            return self.membership_for_thread(thread_id, None).await;
+        }
+        let Some((graph_id, parent_branch)) = self.branch_of_thread(parent).await? else {
+            return Ok(GraphMembership::root(thread_id));
+        };
+        let name = match self.thread_branch_name(thread_id).await? {
+            Some(name) => name,
+            None => match nickname.map(str::trim).filter(|name| !name.is_empty()) {
+                Some(nickname) => format!("agent-{nickname}"),
+                None => format!("agent-{}", short_id(thread_id)),
+            },
+        };
+        Ok(GraphMembership::fork(
+            thread_id,
+            &graph_id,
+            parent_branch.id,
+            name,
+        ))
+    }
+}
+
+/// The last eight characters of a thread ID, which tell threads apart.
+fn short_id(thread_id: &str) -> &str {
+    thread_id
+        .char_indices()
+        .rev()
+        .nth(7)
+        .map_or(thread_id, |(start, _)| &thread_id[start..])
 }
 
 /// Replayed blocks of referenced threads, by thread and head.
@@ -503,7 +545,8 @@ async fn run_in_background(
     match indexer {
         Some((indexing, events)) => {
             let indexer =
-                ShadowIndexer::new(store, graph_id, branch, indexing.model, indexing.config);
+                ShadowIndexer::new(store, graph_id, branch, indexing.model, indexing.config)
+                    .with_cards_listener(indexing.on_cards);
             tokio::join!(writer, indexer.run(events));
         }
         None => writer.await,

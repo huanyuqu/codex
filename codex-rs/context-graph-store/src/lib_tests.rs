@@ -209,6 +209,8 @@ async fn renames_stick_and_merges_are_recorded() {
         target_head: None,
         merge_block: None,
         mode: MergeMode::Fold,
+        goal: None,
+        code: None,
     };
     store
         .record_merge("graph-1", &merge)
@@ -258,4 +260,148 @@ async fn names_given_before_a_thread_records_apply_to_its_branch() {
         Some(Some("graph-1".to_string()))
     );
     assert_eq!(name(&store).await, Some("sqlite".to_string()));
+}
+
+#[tokio::test]
+async fn branch_settings_are_kept_by_thread_and_survive_recording() {
+    let home = TempDir::new().unwrap_or_else(|err| panic!("temp dir: {err}"));
+    let store = open_store(&home).await;
+    // Set before the thread records.
+    store
+        .set_branch_purpose("thread-fork", "  compare SQLite  ")
+        .await
+        .unwrap_or_else(|err| panic!("purpose: {err}"));
+    let mut branch = Branch::new(BranchId::new("br_fork"), "fork");
+    branch.thread_id = Some("thread-fork".to_string());
+    store
+        .upsert_branch("graph-1", &branch)
+        .await
+        .unwrap_or_else(|err| panic!("upsert: {err}"));
+    store
+        .set_branch_archived("thread-fork", true)
+        .await
+        .unwrap_or_else(|err| panic!("archive: {err}"));
+    // Recording again keeps the settings.
+    store
+        .upsert_branch("graph-1", &branch)
+        .await
+        .unwrap_or_else(|err| panic!("upsert: {err}"));
+    let settings = store
+        .load_branch_settings("graph-1")
+        .await
+        .unwrap_or_else(|err| panic!("load: {err}"));
+    assert_eq!(
+        settings.get("thread-fork"),
+        Some(&BranchSettings {
+            purpose: Some("compare SQLite".to_string()),
+            archived: true,
+        })
+    );
+
+    // An empty purpose clears it; deleting the thread forgets the settings.
+    store
+        .set_branch_purpose("thread-fork", " ")
+        .await
+        .unwrap_or_else(|err| panic!("purpose: {err}"));
+    let settings = store.load_branch_settings("graph-1").await.ok();
+    assert_eq!(
+        settings.and_then(|settings| settings.get("thread-fork").cloned()),
+        Some(BranchSettings {
+            purpose: None,
+            archived: true,
+        })
+    );
+    store
+        .delete_thread("thread-fork")
+        .await
+        .unwrap_or_else(|err| panic!("delete: {err}"));
+    store
+        .upsert_branch("graph-2", &branch)
+        .await
+        .unwrap_or_else(|err| panic!("upsert: {err}"));
+    assert_eq!(
+        store.load_branch_settings("graph-2").await.ok(),
+        Some(HashMap::new())
+    );
+}
+
+#[tokio::test]
+async fn recall_feedback_is_counted_by_branch() {
+    let home = TempDir::new().unwrap_or_else(|err| panic!("temp dir: {err}"));
+    let store = open_store(&home).await;
+    let main = BranchId::new("br_main");
+    let block = BlockId::from_stored("blk_a1");
+    for feedback in [
+        RecallFeedback::Expanded,
+        RecallFeedback::Missed,
+        RecallFeedback::Expanded,
+        RecallFeedback::Requested,
+    ] {
+        store
+            .record_recall_feedback("graph-1", &main, feedback, Some(&block))
+            .await
+            .unwrap_or_else(|err| panic!("record: {err}"));
+    }
+    assert_eq!(
+        store.recall_feedback_counts("graph-1", &main).await.ok(),
+        Some(RecallFeedbackCounts {
+            expanded: 2,
+            missed: 1,
+            requested: 1,
+        })
+    );
+    assert_eq!(
+        store
+            .recall_feedback_counts("graph-1", &BranchId::new("br_other"))
+            .await
+            .ok(),
+        Some(RecallFeedbackCounts::default())
+    );
+}
+
+#[tokio::test]
+async fn a_merge_of_several_branches_gives_its_block_a_parent_per_branch() {
+    let home = TempDir::new().unwrap_or_else(|err| panic!("temp dir: {err}"));
+    let store = open_store(&home).await;
+    let merge_block = BlockId::from_stored("blk_cgmerge_1");
+    let record = |source: &str, head: &str| MergeRecord {
+        target: BranchId::new("br_main"),
+        source: BranchId::new(source),
+        source_head: Some(BlockId::from_stored(head)),
+        target_head: None,
+        merge_block: Some(merge_block.clone()),
+        mode: MergeMode::Synthesize,
+        goal: Some("pick a cache".to_string()),
+        code: Some(CodeMerge {
+            git_branch: "try-b".to_string(),
+            merge_commit: Some("abc".to_string()),
+            ..CodeMerge::default()
+        }),
+    };
+    for merge in [record("br_a", "blk_a2"), record("br_b", "blk_b3")] {
+        store
+            .record_merge("graph-1", &merge)
+            .await
+            .unwrap_or_else(|err| panic!("record: {err}"));
+    }
+    let parents: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT position, parent_block_id FROM cg_edges WHERE graph_id = 'graph-1' \
+         AND child_block_id = ? ORDER BY position",
+    )
+    .bind(merge_block.as_str())
+    .fetch_all(&store.pool)
+    .await
+    .unwrap_or_else(|err| panic!("edges: {err}"));
+    assert_eq!(
+        parents,
+        vec![(1, "blk_a2".to_string()), (2, "blk_b3".to_string())]
+    );
+    let merges = store
+        .load_merges("graph-1")
+        .await
+        .unwrap_or_else(|err| panic!("load: {err}"));
+    assert_eq!(
+        merges,
+        vec![record("br_a", "blk_a2"), record("br_b", "blk_b3")]
+    );
 }

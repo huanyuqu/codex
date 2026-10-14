@@ -330,3 +330,174 @@ async fn views_are_recorded_with_their_stats() {
         .collect();
     assert_eq!(ids, vec!["u1", "l1", "a1", "u2"]);
 }
+
+/// Answers each kind of prompt with fixed JSON, under its own name.
+struct FixedModel {
+    name: &'static str,
+    answers: Vec<(&'static str, &'static str)>,
+}
+
+impl ShadowModel for FixedModel {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn complete<'a>(
+        &'a self,
+        prompt: &'a ModelPrompt,
+    ) -> BoxFuture<'a, anyhow::Result<ModelCompletion>> {
+        Box::pin(async move {
+            let Some((_, answer)) = self
+                .answers
+                .iter()
+                .find(|(schema, _)| *schema == prompt.schema_name)
+            else {
+                anyhow::bail!("no answer for {}", prompt.schema_name);
+            };
+            Ok(ModelCompletion {
+                text: answer.to_string(),
+                ..ModelCompletion::default()
+            })
+        })
+    }
+}
+
+/// Scores the cards in order with fixed scores.
+struct FixedScorer(Vec<f32>);
+
+impl RelevanceScorer for FixedScorer {
+    fn name(&self) -> &str {
+        "fixed"
+    }
+
+    fn score<'a>(
+        &'a self,
+        _question: &'a str,
+        documents: &'a [String],
+    ) -> BoxFuture<'a, anyhow::Result<Vec<f32>>> {
+        Box::pin(async move { Ok(self.0.iter().copied().take(documents.len()).collect()) })
+    }
+}
+
+fn no_reading() -> RecallConfig {
+    RecallConfig {
+        read_over_tokens: u32::MAX,
+        ..config()
+    }
+}
+
+#[tokio::test]
+async fn an_unsure_screening_is_redone_by_the_stronger_model() {
+    let session = Session::new();
+    let history = session.history();
+    let first = Arc::new(FixedModel {
+        name: "small",
+        answers: vec![(
+            "context_selection",
+            r#"{"selected": [{"card": "C2", "detail": "summary", "reason": ""}],
+                "uncertain": [], "confidence": "low"}"#,
+        )],
+    });
+    let strong = Arc::new(FixedModel {
+        name: "strong",
+        answers: vec![(
+            "context_selection",
+            r#"{"selected": [{"card": "C3", "detail": "full", "reason": "the fix"}],
+                "uncertain": [], "confidence": "high"}"#,
+        )],
+    });
+    let recall = Recaller::new(first, None, no_reading())
+        .with_escalation(Some(strong))
+        .recall(&history, "nested comments?")
+        .await
+        .unwrap_or_else(|err| panic!("recall: {err:#}"));
+    assert_eq!(
+        recall
+            .stats
+            .escalation
+            .as_ref()
+            .map(|call| call.model.as_str()),
+        Some("strong")
+    );
+    assert!(shown(&recall).contains(&("a1", Presentation::Full, Reason::Selected)));
+    assert!(!shown(&recall).iter().any(|entry| entry.0 == "l1"));
+
+    // A sure screening keeps its answer.
+    let sure = Arc::new(FixedModel {
+        name: "small",
+        answers: vec![(
+            "context_selection",
+            r#"{"selected": [{"card": "C2", "detail": "summary", "reason": ""}],
+                "uncertain": [], "confidence": "high"}"#,
+        )],
+    });
+    let strong: Arc<dyn ShadowModel> = Arc::new(FixedModel {
+        name: "strong",
+        answers: Vec::new(),
+    });
+    let recall = Recaller::new(sure, None, no_reading())
+        .with_escalation(Some(strong))
+        .recall(&history, "nested comments?")
+        .await
+        .unwrap_or_else(|err| panic!("recall: {err:#}"));
+    assert_eq!(recall.stats.escalation, None);
+    assert!(shown(&recall).contains(&("l1", Presentation::Summary, Reason::Selected)));
+}
+
+#[tokio::test]
+async fn pointwise_screening_picks_by_score_without_a_listwise_model() {
+    let session = Session::new();
+    let history = session.history();
+    // The candidates are u1, l1 and a1; u2 is the recent turn.
+    let unused: Arc<dyn ShadowModel> = Arc::new(FixedModel {
+        name: "unused",
+        answers: Vec::new(),
+    });
+    let recall = Recaller::new(
+        unused,
+        None,
+        RecallConfig {
+            strategy: ScreenStrategy::Pointwise,
+            ..no_reading()
+        },
+    )
+    .with_scorer(Some(Arc::new(FixedScorer(vec![0.1, 0.6, 0.9]))))
+    .recall(&history, "nested comments?")
+    .await
+    .unwrap_or_else(|err| panic!("recall: {err:#}"));
+    assert_eq!(recall.stats.scorer.as_deref(), Some("fixed"));
+    assert_eq!(recall.stats.scored, 3);
+    let shown = shown(&recall);
+    assert!(shown.contains(&("a1", Presentation::Full, Reason::Selected)));
+    assert!(shown.contains(&("l1", Presentation::Summary, Reason::Selected)));
+}
+
+#[tokio::test]
+async fn a_cascade_screens_only_the_best_scored_cards() {
+    let session = Session::new();
+    let history = session.history();
+    let model = Arc::new(FixedModel {
+        name: "screen",
+        answers: vec![(
+            "context_selection",
+            r#"{"selected": [{"card": "C1", "detail": "full", "reason": ""}],
+                "uncertain": [], "confidence": "high"}"#,
+        )],
+    });
+    let recall = Recaller::new(
+        model,
+        None,
+        RecallConfig {
+            strategy: ScreenStrategy::Cascade,
+            cascade_candidates: 1,
+            ..no_reading()
+        },
+    )
+    .with_scorer(Some(Arc::new(FixedScorer(vec![0.1, 0.2, 0.9]))))
+    .recall(&history, "nested comments?")
+    .await
+    .unwrap_or_else(|err| panic!("recall: {err:#}"));
+    // C1 of the narrowed catalog is a1, the best scored card.
+    assert_eq!(recall.stats.candidates, 1);
+    assert!(shown(&recall).contains(&("a1", Presentation::Full, Reason::Selected)));
+}

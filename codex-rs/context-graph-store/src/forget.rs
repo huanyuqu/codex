@@ -9,7 +9,7 @@ use sqlx::Row;
 use crate::LocalContextGraphStore;
 
 /// Removes a whole graph from every table keyed by graph.
-pub(crate) const DELETE_GRAPH: [&str; 10] = [
+pub(crate) const DELETE_GRAPH: [&str; 11] = [
     "DELETE FROM cg_branches WHERE graph_id = ?",
     "DELETE FROM cg_blocks WHERE graph_id = ?",
     "DELETE FROM cg_edges WHERE graph_id = ?",
@@ -20,6 +20,7 @@ pub(crate) const DELETE_GRAPH: [&str; 10] = [
     "DELETE FROM cg_merges WHERE graph_id = ?",
     "DELETE FROM cg_episode_cards WHERE graph_id = ?",
     "DELETE FROM cg_branch_cards WHERE graph_id = ?",
+    "DELETE FROM cg_recall_feedback WHERE graph_id = ?",
 ];
 
 impl LocalContextGraphStore {
@@ -42,10 +43,15 @@ impl LocalContextGraphStore {
         for graph_id in graphs {
             self.forget_branches(&graph_id, &deleted).await?;
         }
-        sqlx::query("DELETE FROM cg_thread_names WHERE thread_id = ?")
-            .bind(thread_id)
-            .execute(&self.pool)
-            .await?;
+        for statement in [
+            "DELETE FROM cg_thread_names WHERE thread_id = ?",
+            "DELETE FROM cg_thread_settings WHERE thread_id = ?",
+        ] {
+            sqlx::query(statement)
+                .bind(thread_id)
+                .execute(&self.pool)
+                .await?;
+        }
         Ok(())
     }
 
@@ -100,6 +106,7 @@ impl LocalContextGraphStore {
                 "DELETE FROM cg_turn_cards WHERE graph_id = ? AND branch_id = ?",
                 "DELETE FROM cg_views WHERE graph_id = ? AND branch_id = ?",
                 "DELETE FROM cg_branch_cards WHERE graph_id = ? AND branch_id = ?",
+                "DELETE FROM cg_recall_feedback WHERE graph_id = ? AND branch_id = ?",
             ] {
                 sqlx::query(statement)
                     .bind(graph_id)

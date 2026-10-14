@@ -9,15 +9,20 @@ use codex_context_graph::ContextGraph;
 use codex_context_graph::GraphError;
 use codex_context_graph::branches::BranchRow;
 use codex_context_graph::branches::FoldSummary;
+use codex_context_graph::branches::SearchHit;
 use codex_context_graph::branches::Since;
+use codex_context_graph::branches::TurnRow;
 use codex_context_graph::branches::branch_rows;
+use codex_context_graph::branches::branch_turns;
 use codex_context_graph::branches::fold_summary;
+use codex_context_graph::branches::search_graph;
 use codex_context_graph::card::BlockCard;
 use codex_context_graph::episode::BranchCard;
 
 use crate::LocalContextGraphStore;
 use crate::merges::MergeMode;
 use crate::merges::MergeRecord;
+use crate::settings::BranchSettings;
 
 /// The graph a thread records into, seen from that thread's branch.
 #[derive(Debug, Clone)]
@@ -30,6 +35,8 @@ pub struct BranchTree {
     /// The branch of the thread the tree was loaded for.
     pub current: BranchId,
     pub merges: Vec<MergeRecord>,
+    /// Purposes and archive marks, by thread.
+    pub settings: HashMap<String, BranchSettings>,
 }
 
 /// What merging a branch adds to the target thread's history.
@@ -73,6 +80,7 @@ impl LocalContextGraphStore {
             .collect();
         let merges = self.load_merges(&graph_id).await?;
         let branch_cards = self.load_branch_cards(&graph_id).await?;
+        let settings = self.load_branch_settings(&graph_id).await?;
         Ok(Some(BranchTree {
             graph_id,
             graph,
@@ -80,14 +88,49 @@ impl LocalContextGraphStore {
             branch_cards,
             current: branch.id,
             merges,
+            settings,
         }))
     }
 }
 
 impl BranchTree {
-    /// The branches in tree order.
+    /// The branches in tree order; archived branches have the archived status.
     pub fn rows(&self) -> Vec<BranchRow> {
-        branch_rows(&self.graph, &self.cards, &self.current)
+        let mut rows = branch_rows(&self.graph, &self.cards, &self.current);
+        for row in &mut rows {
+            if self.settings_of(row).archived && row.status == BranchStatus::Active {
+                row.status = BranchStatus::Archived;
+            }
+        }
+        rows
+    }
+
+    /// What the user said about `row`'s branch.
+    pub fn settings_of(&self, row: &BranchRow) -> BranchSettings {
+        row.thread_id
+            .as_ref()
+            .and_then(|thread_id| self.settings.get(thread_id))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The turns of the branch `name` names, inherited ones included.
+    pub fn turns(&self, name: &str) -> Result<Vec<TurnRow>, MergeError> {
+        let row = self
+            .find(name)
+            .ok_or_else(|| MergeError::UnknownBranch(name.to_string()))?;
+        Ok(branch_turns(&self.graph, &self.cards, &row.branch)?)
+    }
+
+    /// The blocks of every branch whose cards best match `query`.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        search_graph(&self.graph, &self.cards, query, limit)
+    }
+
+    /// The branch that recorded `block`, and its thread.
+    pub fn owner(&self, block: &BlockId) -> Option<&codex_context_graph::Branch> {
+        let node = self.graph.node(block)?;
+        self.graph.branch(&node.owner)
     }
 
     /// The branch `name` names: a branch ID, a branch name or a thread ID.
@@ -165,6 +208,8 @@ impl BranchTree {
                 target_head: head(&self.current),
                 merge_block: None,
                 mode,
+                goal: None,
+                code: None,
             },
             turns: fold.turns,
             message,

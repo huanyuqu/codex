@@ -142,6 +142,8 @@ async fn trees_find_branches_and_plan_merges() {
             target_head: Some(BlockId::from_stored("u3")),
             merge_block: None,
             mode: MergeMode::Reference,
+            goal: None,
+            code: None,
         }
     );
     assert!(plan.message.starts_with(

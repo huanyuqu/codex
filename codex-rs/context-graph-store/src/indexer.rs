@@ -83,6 +83,9 @@ struct BatchResult {
     latency: Duration,
 }
 
+/// Called with the number of blocks that got model cards, after they are stored.
+pub type CardsListener = Arc<dyn Fn(usize) + Send + Sync>;
+
 /// Indexes one branch of one graph. Feed it the recorder's events in order.
 pub struct ShadowIndexer {
     store: LocalContextGraphStore,
@@ -98,6 +101,7 @@ pub struct ShadowIndexer {
     requests_started: u64,
     /// When the last turn ended, while its turns wait to be consolidated.
     unconsolidated_since: Option<Instant>,
+    on_cards: Option<CardsListener>,
 }
 
 impl ShadowIndexer {
@@ -121,7 +125,14 @@ impl ShadowIndexer {
             in_flight: JoinSet::new(),
             requests_started: 0,
             unconsolidated_since: None,
+            on_cards: None,
         }
+    }
+
+    /// Tells `listener` whenever blocks get model cards.
+    pub fn with_cards_listener(mut self, listener: Option<CardsListener>) -> Self {
+        self.on_cards = listener;
+        self
     }
 
     /// Indexes one recorder event, starting a model request when a batch is complete.
@@ -355,6 +366,7 @@ impl ShadowIndexer {
                         answer.missing.len()
                     ));
                 }
+                let mut written = 0;
                 for model_card in answer.cards {
                     let Some(position) = unanswered
                         .iter()
@@ -365,8 +377,9 @@ impl ShadowIndexer {
                     let (mut card, _) = unanswered.remove(position);
                     model_card.apply_to(&mut card, &request.indexer);
                     redact_card(&mut card);
-                    if let Err(err) = self.store.upsert_card(&self.graph_id, &card).await {
-                        warn!("context graph card write failed: {err:#}");
+                    match self.store.upsert_card(&self.graph_id, &card).await {
+                        Ok(()) => written += 1,
+                        Err(err) => warn!("context graph card write failed: {err:#}"),
                     }
                     if let Some(recent) = self
                         .recent
@@ -375,6 +388,11 @@ impl ShadowIndexer {
                     {
                         *recent = card;
                     }
+                }
+                if written > 0
+                    && let Some(listener) = &self.on_cards
+                {
+                    listener(written);
                 }
             }
             Err(err) => {
