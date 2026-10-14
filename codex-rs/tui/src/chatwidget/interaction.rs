@@ -323,6 +323,7 @@ impl ChatWidget {
                     self.pause_active_goal_for_interrupt();
                 }
                 self.handle_composer_input_result(input_result, had_modal_or_popup);
+                self.note_composer_draft();
             }
         }
         KeyEventAction::None
@@ -549,6 +550,7 @@ impl ChatWidget {
         }
         self.bottom_pane.handle_paste(text);
         self.refresh_startup_recovery();
+        self.note_composer_draft();
     }
 
     pub(crate) fn is_in_paste_burst(&self) -> bool {

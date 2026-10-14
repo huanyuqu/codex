@@ -210,6 +210,7 @@ fn delivery_note(view: &ContextGraphView) -> String {
         Some("earlier") => format!(", made for the previous request{waited_too}"),
         Some("deferred") => ", added while the turn ran".to_string(),
         Some("lexical") => ", lexical matches while recall ran".to_string(),
+        Some("draft") => ", made while the request was written".to_string(),
         _ => String::new(),
     }
 }
@@ -948,6 +949,37 @@ impl App {
             lines.join("\n"),
             Some("/context full|auto|recall switches the mode; /recall rebuilds now.".into()),
         );
+    }
+
+    /// Starts recall for `draft`, the request being written, in the background, so that the turn
+    /// it starts need not wait for recall. Nothing is shown: a draft that would not be recalled
+    /// for, or a failed request, only means the turn recalls as usual.
+    pub(super) fn prefetch_recall(
+        &self,
+        app_server: &AppServerSession,
+        thread_id: ThreadId,
+        draft: String,
+    ) {
+        let handle = app_server.request_handle();
+        tokio::spawn(async move {
+            let result = handle
+                .request_typed::<codex_app_server_protocol::ContextGraphPrefetchResponse>(
+                    ClientRequest::ContextGraphPrefetch {
+                        request_id: RequestId::String(format!(
+                            "context-graph-prefetch-{}",
+                            uuid::Uuid::new_v4()
+                        )),
+                        params: codex_app_server_protocol::ContextGraphPrefetchParams {
+                            thread_id: thread_id.to_string(),
+                            text: draft,
+                        },
+                    },
+                )
+                .await;
+            if let Err(error) = result {
+                tracing::debug!("could not start recall for the draft: {error}");
+            }
+        });
     }
 
     /// Runs `/recall`: rebuilds the history by recall before the next turn, or with a

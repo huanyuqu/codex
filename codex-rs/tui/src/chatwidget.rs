@@ -261,6 +261,7 @@ mod config_panel;
 mod connector_mentions;
 mod connectors;
 mod constructor;
+mod draft_recall;
 mod dynamic_activity;
 mod empty_state_policy;
 pub(crate) use self::connectors::ConnectorScopeGeneration;
@@ -604,6 +605,8 @@ pub(crate) struct ChatWidget {
     suppress_image_paste_until: Instant,
     copy_last_response_binding: Vec<KeyBinding>,
     running_commands: HashMap<String, RunningCommand>,
+    /// The request being written, so that recall can start for it when typing pauses.
+    draft_recall: draft_recall::DraftRecall,
     collab_agent_metadata: HashMap<ThreadId, AgentMetadata>,
     pending_collab_spawn_requests: HashMap<String, multi_agents::SpawnRequestSummary>,
     suppressed_exec_calls: HashSet<String>,

@@ -185,6 +185,7 @@ impl ChatWidget {
             suppress_image_paste_until: Instant::now(),
             copy_last_response_binding,
             running_commands: HashMap::new(),
+            draft_recall: Default::default(),
             collab_agent_metadata: HashMap::new(),
             pending_collab_spawn_requests: HashMap::new(),
             suppressed_exec_calls: HashSet::new(),

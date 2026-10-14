@@ -151,10 +151,16 @@ A turn does not wait long for recall:
 - When the next request comes, that recall is used as it is if it already shows
   the blocks lexical search ranks highest for the request; a request with
   nothing to match, such as "go on", is served by it too.
+- While you write the next request, the TUI asks recall to start on the draft
+  when you pause typing (app servers: `contextGraph/prefetch`). If you send the
+  draft as it was, or a request that recall still serves, the turn starts from
+  it.
 - Otherwise the turn waits up to `recall_wait_ms` for the recall of its
   request. If that takes longer, the turn goes on with the earlier recall, or
   with summaries of the blocks lexical search ranks highest, and the late
-  recall adds what it picked before a later model request of the turn.
+  recall adds what it picked before a later model request of the turn. A recall
+  made ahead that was still running when the request came is kept: if it ends
+  before the request's own, it stands in until then.
 
 When the history has to shrink at once, because the context window is full or
 you ran `/compact`, recall is waited for.
@@ -237,6 +243,7 @@ Clients use these experimental requests; the TUI uses them for `/tree` and
 | `contextGraph/branch/preview` | What folding a branch into a thread would add. |
 | `contextGraph/mode/set` | Switches a loaded thread's context mode. |
 | `contextGraph/recall` | Shows the view recall would build for a question, or asks for a rebuild before the next turn. |
+| `contextGraph/prefetch` | Starts recall for a draft of the thread's next request, so the turn it starts need not wait; clients send it when the user pauses typing. |
 | `contextGraph/views/read` | The views recall built for a thread, most recent first, with the blocks each showed and why, and the counts of expanded and missed blocks. |
 
 `contextGraph/updated` notifies clients when a merge or a branch change alters

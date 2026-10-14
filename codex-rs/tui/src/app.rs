@@ -1169,6 +1169,11 @@ impl App {
                         owner.refresh_realtime_microphone_level();
                     }
                     self.chat_widget.pre_draw_tick();
+                    if let Some((thread_id, draft)) = self.chat_widget.take_paused_draft()
+                        && self.context_graph_branches_enabled()
+                    {
+                        self.prefetch_recall(app_server, thread_id, draft);
+                    }
                     self.refresh_agents_overview_usage(app_server, tui.frame_requester());
                     let rendered_area = self.render_chat_widget_frame(tui, screen_size)?;
                     if tui.is_owned_screen()
