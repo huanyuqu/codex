@@ -770,6 +770,11 @@ pub(crate) enum AppEvent {
         purpose: String,
     },
 
+    /// Move the commands `thread_id`'s turn is waiting on to the background.
+    DetachRunningCommands {
+        thread_id: ThreadId,
+    },
+
     /// Switch to a selected context branch if the originating chat is still current and idle.
     SwitchContextBranch {
         current_thread_id: ThreadId,

@@ -244,6 +244,18 @@ impl ChatWidget {
             return KeyEventAction::None;
         }
 
+        // Commands the turn waits on go on in the background; the model hears when they exit.
+        if self.chat_keymap.background_commands.is_pressed(key_event)
+            && self.bottom_pane.is_task_running()
+            && self.bottom_pane.no_modal_or_popup_active()
+            && !self.running_commands.is_empty()
+            && let Some(thread_id) = self.thread_id
+        {
+            self.app_event_tx
+                .send(AppEvent::DetachRunningCommands { thread_id });
+            return KeyEventAction::None;
+        }
+
         const REVIEW_STEER_UNAVAILABLE_MESSAGE: &str = "Steer messages aren't supported during /review. Press Ctrl+C now to cancel the review.";
 
         if self.chat_keymap.interrupt_turn.is_pressed(key_event)

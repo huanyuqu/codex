@@ -136,6 +136,8 @@ pub(crate) struct ChatKeymap {
     chord_hints: Arc<RuntimeChordKeymap>,
     /// Interrupt the active turn.
     pub(crate) interrupt_turn: Vec<KeyBinding>,
+    /// Move the commands the active turn is waiting on to the background.
+    pub(crate) background_commands: Vec<KeyBinding>,
     /// Decrease the active reasoning effort.
     pub(crate) decrease_reasoning_effort: Vec<KeyBinding>,
     /// Increase the active reasoning effort.
@@ -800,6 +802,11 @@ impl RuntimeKeymap {
                 keymap.chat.interrupt_turn.as_ref(),
                 &defaults.chat.interrupt_turn,
                 "tui.keymap.chat.interrupt_turn",
+            )?,
+            background_commands: resolve_bindings(
+                keymap.chat.background_commands.as_ref(),
+                &defaults.chat.background_commands,
+                "tui.keymap.chat.background_commands",
             )?,
             decrease_reasoning_effort: resolve_bindings(
                 keymap.chat.decrease_reasoning_effort.as_ref(),
@@ -1687,6 +1694,7 @@ impl RuntimeKeymap {
                 toggle_voice_mute: default_bindings![plain(KeyCode::F(9))],
                 chord_hints: Arc::default(),
                 interrupt_turn: default_bindings![plain(KeyCode::Esc)],
+                background_commands: default_bindings![ctrl(KeyCode::Char('b'))],
                 decrease_reasoning_effort: default_bindings![
                     alt(KeyCode::Char(',')),
                     shift(KeyCode::Down)
@@ -2000,6 +2008,7 @@ impl RuntimeKeymap {
             ("next_permission_mode", &self.chat.next_permission_mode),
             ("prompt_stack_back", &self.chat.prompt_stack_back),
             ("skip_question", &self.chat.skip_question),
+            ("background_commands", &self.chat.background_commands),
         ] {
             if bindings.iter().any(|binding| {
                 let (code, modifiers) = binding.parts();
@@ -2062,6 +2071,10 @@ impl RuntimeKeymap {
                 self.chat.toggle_voice_mute.as_slice(),
             ),
             ("chat.interrupt_turn", self.chat.interrupt_turn.as_slice()),
+            (
+                "chat.background_commands",
+                self.chat.background_commands.as_slice(),
+            ),
             (
                 "chat.decrease_reasoning_effort",
                 self.chat.decrease_reasoning_effort.as_slice(),
@@ -2224,6 +2237,10 @@ impl RuntimeKeymap {
                 ),
                 ("chat.interrupt_turn", self.chat.interrupt_turn.as_slice()),
                 (
+                    "chat.background_commands",
+                    self.chat.background_commands.as_slice(),
+                ),
+                (
                     "chat.decrease_reasoning_effort",
                     self.chat.decrease_reasoning_effort.as_slice(),
                 ),
@@ -2303,11 +2320,19 @@ impl RuntimeKeymap {
                 ("editor.kill_line_end", self.editor.kill_line_end.as_slice()),
                 ("editor.yank", self.editor.yank.as_slice()),
             ],
-            [(
-                "composer.submit",
-                "editor.insert_newline",
-                key_hint::plain(KeyCode::Enter),
-            )],
+            [
+                (
+                    "composer.submit",
+                    "editor.insert_newline",
+                    key_hint::plain(KeyCode::Enter),
+                ),
+                // Only taken while the turn waits on a command; otherwise it moves the cursor.
+                (
+                    "chat.background_commands",
+                    "editor.move_left",
+                    key_hint::ctrl(KeyCode::Char('b')),
+                ),
+            ],
         )?;
 
         let context_bindings = |context| {

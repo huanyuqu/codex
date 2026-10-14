@@ -7,6 +7,19 @@ use super::*;
 use crate::exec_cell::CommandOutput;
 
 impl ChatWidget {
+    /// Shows how to move a running command to the background while the turn waits on one.
+    pub(crate) fn sync_foreground_command_hint(&mut self) {
+        let hint = if self.running_commands.is_empty() {
+            None
+        } else {
+            self.chat_keymap
+                .background_commands
+                .first()
+                .map(|binding| format!("{} to background", binding.display_label()))
+        };
+        self.bottom_pane.set_foreground_command_hint(hint);
+    }
+
     pub(super) fn flush_unified_exec_wait_streak(&mut self) {
         let Some(wait) = self.unified_exec_wait_streak.take() else {
             return;
@@ -264,6 +277,7 @@ impl ChatWidget {
                 source,
             },
         );
+        self.sync_foreground_command_hint();
         let is_wait_interaction = matches!(source, ExecCommandSource::UnifiedExecInteraction);
         let command_display = command.join(" ");
         let should_suppress_unified_wait = is_wait_interaction
@@ -359,6 +373,7 @@ impl ChatWidget {
         let aggregated_output = aggregated_output.unwrap_or_default();
 
         let running = self.running_commands.remove(&id);
+        self.sync_foreground_command_hint();
         if self.suppressed_exec_calls.remove(&id) {
             return;
         }

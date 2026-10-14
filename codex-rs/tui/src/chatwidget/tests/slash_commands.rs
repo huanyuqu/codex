@@ -4160,3 +4160,37 @@ async fn owned_copy_guard_defers_queued_input_until_released() {
         assert!(chat.input_queue.queued_user_messages.is_empty());
     }
 }
+
+#[tokio::test]
+async fn ctrl_b_moves_a_running_command_to_the_background() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    handle_turn_started(&mut chat, "turn-1");
+    // Without a running command the key does nothing.
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    while let Ok(event) = rx.try_recv() {
+        assert!(!matches!(event, AppEvent::DetachRunningCommands { .. }));
+    }
+
+    let command = begin_exec(&mut chat, "cmd-1", "cargo test");
+    assert!(
+        chat.bottom_pane
+            .foreground_command_hint()
+            .is_some_and(|hint| hint.ends_with("b to background")),
+        "{:?}",
+        chat.bottom_pane.foreground_command_hint()
+    );
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    let mut detached = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::DetachRunningCommands { thread_id: id } = event {
+            assert_eq!(id, thread_id);
+            detached = true;
+        }
+    }
+    assert!(detached);
+
+    end_exec(&mut chat, command, "ok", "", 0);
+    assert_eq!(chat.bottom_pane.foreground_command_hint(), None);
+}

@@ -331,6 +331,8 @@ pub(crate) struct BottomPane {
     /// When a status row exists, this summary is mirrored inline in that row;
     /// when no status row exists, it renders as its own footer row.
     unified_exec_footer: UnifiedExecFooter,
+    /// How to move the command the turn waits on to the background, while one runs.
+    foreground_command_hint: Option<String>,
     /// Preview of pending steers and queued drafts shown above the composer.
     pending_input_preview: PendingInputPreview,
     /// Inactive threads with pending approval requests.
@@ -407,6 +409,7 @@ impl BottomPane {
             inline_banner: None,
             status_timer: crate::status_indicator_widget::StatusTimer::default(),
             unified_exec_footer: UnifiedExecFooter::new(),
+            foreground_command_hint: None,
             pending_input_preview: PendingInputPreview::new(),
             pending_thread_approvals: PendingThreadApprovals::new(),
             esc_backtrack_hint: false,
@@ -1790,9 +1793,29 @@ impl BottomPane {
     ///
     /// This keeps status-line inline text synchronized without forcing the
     /// standalone unified-exec footer row to be visible.
+    #[cfg(test)]
+    pub(crate) fn foreground_command_hint(&self) -> Option<&str> {
+        self.foreground_command_hint.as_deref()
+    }
+
+    /// Shows how to move the command the turn waits on to the background, or stops showing it.
+    pub(crate) fn set_foreground_command_hint(&mut self, hint: Option<String>) {
+        if self.foreground_command_hint != hint {
+            self.foreground_command_hint = hint;
+            self.sync_status_inline_message();
+            self.request_redraw();
+        }
+    }
+
     fn sync_status_inline_message(&mut self) {
         if let Some(status) = self.status.as_mut() {
-            status.update_inline_message(self.unified_exec_footer.summary_text());
+            let summary = self.unified_exec_footer.summary_text();
+            let inline = match (&self.foreground_command_hint, summary) {
+                (Some(hint), Some(summary)) => Some(format!("{hint} · {summary}")),
+                (Some(hint), None) => Some(hint.clone()),
+                (None, summary) => summary,
+            };
+            status.update_inline_message(inline);
             status.update_hook_status_message(self.hook_status_message.clone());
         }
     }

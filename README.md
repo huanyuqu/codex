@@ -85,3 +85,7 @@ This repository is licensed under the [Apache-2.0 License](LICENSE).
 This fork records each conversation as a context graph: forks are branches that `/tree` browses, searches and switches between, `/merge` folds, references or synthesizes branches back into a chat, and a shadow agent indexes every block so that recall can choose, for each request, which parts of a long history the model sees. See [the context graph guide](docs/context_graph.md).
 
 The `codex merge` command of the npm package still merges saved conversations into a new one; see [the merge guide](docs/context_merge.md) and [local checkout instructions](docs/context_merge_checkout.md).
+
+## Background commands
+
+Long commands such as builds, test suites and servers can run in the background: the model starts them with `background: true`, or you press `Ctrl+B` while a turn waits on one. The model is told when they exit instead of polling them, and the conversation goes on meanwhile. See [background commands](docs/background_commands.md).

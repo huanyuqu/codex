@@ -627,6 +627,20 @@ impl App {
             } => {
                 Box::pin(self.context_recall(app_server, thread_id, question)).await;
             }
+            AppEvent::DetachRunningCommands { thread_id } => {
+                match app_server.thread_background_terminals_detach(thread_id).await {
+                    Ok(()) => self.chat_widget.add_info_message(
+                        "Moved the running command to the background.".into(),
+                        Some(
+                            "The turn goes on; the model is told when the command exits. /ps lists it."
+                                .into(),
+                        ),
+                    ),
+                    Err(error) => self.chat_widget.add_error_message(format!(
+                        "Could not move the command to the background: {error:#}"
+                    )),
+                }
+            }
             AppEvent::RememberForkPurpose { name, purpose } => {
                 self.pending_fork_purpose = Some((name, purpose));
             }

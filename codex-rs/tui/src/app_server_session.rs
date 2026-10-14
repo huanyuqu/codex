@@ -1886,6 +1886,24 @@ impl AppServerSession {
         Ok(())
     }
 
+    pub(crate) async fn thread_background_terminals_detach(
+        &mut self,
+        thread_id: ThreadId,
+    ) -> Result<()> {
+        let request_id = self.next_request_id();
+        let _: codex_app_server_protocol::ThreadBackgroundTerminalsDetachResponse = self
+            .client
+            .request_typed(ClientRequest::ThreadBackgroundTerminalsDetach {
+                request_id,
+                params: codex_app_server_protocol::ThreadBackgroundTerminalsDetachParams {
+                    thread_id: thread_id.to_string(),
+                },
+            })
+            .await
+            .wrap_err("thread/backgroundTerminals/detach failed in TUI")?;
+        Ok(())
+    }
+
     pub(crate) async fn thread_background_terminals_clean(
         &mut self,
         thread_id: ThreadId,
