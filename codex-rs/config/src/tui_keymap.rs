@@ -177,6 +177,9 @@ pub struct TuiChatKeymap {
     pub toggle_voice_mute: Option<KeybindingsSpec>,
     /// Interrupt the active turn.
     pub interrupt_turn: Option<KeybindingsSpec>,
+    /// Move the commands the active turn is waiting on to the background; the model is told
+    /// when they exit.
+    pub background_commands: Option<KeybindingsSpec>,
     /// Decrease the active reasoning effort.
     pub decrease_reasoning_effort: Option<KeybindingsSpec>,
     /// Increase the active reasoning effort.

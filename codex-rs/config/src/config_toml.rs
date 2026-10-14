@@ -347,6 +347,11 @@ pub struct ConfigToml {
     /// Default: `300000` (5 minutes).
     pub background_terminal_max_timeout: Option<u64>,
 
+    /// Whether a command the model left running in the background starts a turn when it exits
+    /// while the session is idle, so the model can react at once. When off, the model learns of
+    /// the exit at the next turn. Default: `true`.
+    pub background_terminal_wake: Option<bool>,
+
     /// Seconds a thread must have no subscribers and no activity before app-server
     /// unloads it. Defaults to 1800 (30 minutes); zero unloads immediately.
     /// Changes require a server restart.

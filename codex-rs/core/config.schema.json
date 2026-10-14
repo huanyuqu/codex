@@ -4920,6 +4920,7 @@
               "open_thread": null
             },
             "chat": {
+              "background_commands": null,
               "decrease_reasoning_effort": null,
               "edit_queued_message": null,
               "increase_reasoning_effort": null,
@@ -5420,6 +5421,14 @@
       "additionalProperties": false,
       "description": "Chat context keybindings.",
       "properties": {
+        "background_commands": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Move the commands the active turn is waiting on to the background; the model is told when they exit."
+        },
         "decrease_reasoning_effort": {
           "allOf": [
             {
@@ -5906,6 +5915,7 @@
             }
           ],
           "default": {
+            "background_commands": null,
             "decrease_reasoning_effort": null,
             "edit_queued_message": null,
             "increase_reasoning_effort": null,
@@ -7143,6 +7153,10 @@
       "format": "uint64",
       "minimum": 0.0,
       "type": "integer"
+    },
+    "background_terminal_wake": {
+      "description": "Whether a command the model left running in the background starts a turn when it exits while the session is idle, so the model can react at once. When off, the model learns of the exit at the next turn. Default: `true`.",
+      "type": "boolean"
     },
     "browser_use": {
       "$ref": "#/definitions/BrowserUseConfigToml"

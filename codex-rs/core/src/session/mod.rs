@@ -241,6 +241,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::exec_output::StreamOutput;
 
 pub(crate) mod async_compaction;
+pub(crate) mod background_commands;
 mod code_mode_warning;
 mod config_refresh;
 pub(crate) mod context_window;

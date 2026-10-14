@@ -107,6 +107,9 @@ pub(crate) struct UnifiedExecProcess {
     output_task: Option<JoinHandle<()>>,
     sandbox_type: Option<SandboxType>,
     timed_out: AtomicBool,
+    /// Whether the model left the process running without seeing it exit, so it is told when
+    /// the process exits.
+    notify_on_exit: AtomicBool,
     /// Explicit termination overrides retention of remote output after exit.
     pub(super) termination_requested: AtomicBool,
     // The shell may still need to replay this file after process startup returns.
@@ -153,6 +156,7 @@ impl UnifiedExecProcess {
             output_task: None,
             sandbox_type,
             timed_out: AtomicBool::new(false),
+            notify_on_exit: AtomicBool::new(false),
             termination_requested: AtomicBool::new(false),
             _shell_snapshot: None,
         }
@@ -230,6 +234,16 @@ impl UnifiedExecProcess {
 
     pub(super) fn timed_out(&self) -> bool {
         self.timed_out.load(Ordering::Acquire)
+    }
+
+    /// Sets whether the model is told when the process exits: on while the model has left it
+    /// running, off once the model saw it exit or it was stopped on purpose.
+    pub(super) fn set_notify_on_exit(&self, notify: bool) {
+        self.notify_on_exit.store(notify, Ordering::Release);
+    }
+
+    pub(super) fn notify_on_exit(&self) -> bool {
+        self.notify_on_exit.load(Ordering::Acquire)
     }
 
     fn finish_termination(&self) {

@@ -107,6 +107,8 @@ impl UnifiedExecContext {
 
 #[derive(Debug)]
 pub(crate) struct ExecCommandRequest {
+    /// Return right away and tell the model when the command exits.
+    pub background: bool,
     pub command: Vec<String>,
     pub shell: ShellInvocation,
     pub hook_command: String,
@@ -164,6 +166,9 @@ impl ProcessStore {
 pub(crate) struct UnifiedExecProcessManager {
     process_store: Mutex<ProcessStore>,
     max_write_stdin_yield_time_ms: u64,
+    /// Bumped to make every call waiting on a command return at once, leaving the command to
+    /// run in the background.
+    detach_tx: tokio::sync::watch::Sender<u64>,
 }
 
 impl UnifiedExecProcessManager {
@@ -172,9 +177,32 @@ impl UnifiedExecProcessManager {
             process_store: Mutex::new(ProcessStore::default()),
             max_write_stdin_yield_time_ms: max_write_stdin_yield_time_ms
                 .max(MIN_EMPTY_YIELD_TIME_MS),
+            detach_tx: tokio::sync::watch::channel(0).0,
         }
     }
+
+    /// Makes every `exec_command` and `write_stdin` call waiting on a command return now; the
+    /// commands go on in the background, and the model is told when they exit.
+    pub(crate) fn detach_waiting_commands(&self) {
+        self.detach_tx
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    fn detach_receiver(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.detach_tx.subscribe()
+    }
 }
+
+/// What the model is told about a command that goes on running after its call returns.
+pub(crate) const BACKGROUND_NOTE: &str = "Running in the background. You will get a message \
+with its exit code and output when it exits, so do not poll it; write_stdin is only needed to \
+send it input.";
+pub(crate) const DETACHED_NOTE: &str = "The user moved this command to the background. You will \
+get a message with its exit code and output when it exits; go on without polling it.";
+
+/// How long `exec_command` with `background` waits before returning, to catch commands that fail
+/// at once.
+pub(crate) const BACKGROUND_START_WAIT_MS: u64 = 1_000;
 
 impl Default for UnifiedExecProcessManager {
     fn default() -> Self {

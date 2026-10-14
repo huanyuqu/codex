@@ -55,6 +55,7 @@ mod approvals;
 mod audio_truncation;
 mod auth_recovery_policy;
 mod auto_review;
+mod background_commands;
 mod base_instructions;
 #[path = "bedrock_multi_agent_tests.rs"]
 mod bedrock_multi_agent;

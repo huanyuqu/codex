@@ -643,6 +643,12 @@ impl UnifiedExecProcessManager {
         // For the initial exec_command call, we both stream output to events
         // (via start_streaming_output above) and collect a snapshot here for
         // the tool response body.
+        // A background command returns after a short wait that catches immediate failures.
+        let yield_time_ms = if request.background {
+            yield_time_ms.min(super::BACKGROUND_START_WAIT_MS)
+        } else {
+            yield_time_ms
+        };
         let wait = completion.as_ref().map_or_else(
             || Duration::from_millis(yield_time_ms),
             |completion| completion.timeout,
@@ -650,10 +656,13 @@ impl UnifiedExecProcessManager {
         let deadline = start
             .checked_add(wait)
             .ok_or_else(|| UnifiedExecError::process_failed("timeout_ms is too large".into()))?;
-        let collected_output = Self::collect_output_until_deadline(
+        // A command run to completion cannot be moved to the background.
+        let detach = completion.is_none().then(|| self.detach_receiver());
+        let (collected_output, detached) = Self::collect_output_until_deadline_or_detached(
             process.output_handles(),
             Some(context.session.subscribe_elicitation_pause_state()),
             deadline,
+            detach,
         )
         .await;
         if let Some(completion) = completion.as_mut()
@@ -840,7 +849,20 @@ impl UnifiedExecProcessManager {
             (None, exit_code)
         };
 
+        // A command started in the background, or moved there by the user, tells the model when
+        // it exits.
+        if response_process_id.is_some() && (request.background || detached) {
+            process.set_notify_on_exit(true);
+        }
+        let note = response_process_id.and(if request.background {
+            Some(super::BACKGROUND_NOTE)
+        } else if detached {
+            Some(super::DETACHED_NOTE)
+        } else {
+            None
+        });
         let response = ExecCommandToolOutput {
+            note: note.map(str::to_string),
             event_call_id: context.call_id.clone(),
             chunk_id,
             wall_time,
@@ -1038,8 +1060,13 @@ impl UnifiedExecProcessManager {
         };
         let start = Instant::now();
         let deadline = start + Duration::from_millis(yield_time_ms);
-        let collected_output =
-            Self::collect_output_until_deadline(&output, pause_state, deadline).await;
+        let (collected_output, detached) = Self::collect_output_until_deadline_or_detached(
+            &output,
+            pause_state,
+            deadline,
+            Some(self.detach_receiver()),
+        )
+        .await;
         let wall_time = Instant::now().saturating_duration_since(start);
 
         let original_token_count = usize::try_from(approx_tokens_from_byte_count(
@@ -1103,7 +1130,15 @@ impl UnifiedExecProcessManager {
             }
         };
 
+        // The model saw the exit; or the user moved the command to the background, and the model
+        // is told when it exits.
+        if process_id.is_none() {
+            process.set_notify_on_exit(false);
+        } else if detached {
+            process.set_notify_on_exit(true);
+        }
         let response = ExecCommandToolOutput {
+            note: (detached && process_id.is_some()).then(|| super::DETACHED_NOTE.to_string()),
             event_call_id,
             chunk_id,
             wall_time,
@@ -1241,6 +1276,7 @@ impl UnifiedExecProcessManager {
     ) {
         let plugin_metrics_sidecar =
             metrics_sidecar.map(|sidecar| Arc::new(std::sync::Mutex::new(Some(sidecar))));
+        let display_command = hook_command.clone();
         let entry = ProcessEntry {
             process: Arc::clone(&process),
             plugin_metrics_sidecar: plugin_metrics_sidecar.clone(),
@@ -1266,6 +1302,7 @@ impl UnifiedExecProcessManager {
             Arc::clone(&process),
             context,
             command.to_vec(),
+            display_command,
             cwd,
             process_id,
             plugin_attribution,
@@ -1276,6 +1313,7 @@ impl UnifiedExecProcessManager {
         );
         // Install the watcher before cancellable cleanup, and outside the process-store lock.
         if let Some(pruned_entry) = pruned_entry {
+            pruned_entry.process.set_notify_on_exit(false);
             unregister_network_approval_for_entry(&pruned_entry).await;
             pruned_entry.process.terminate();
         }
@@ -1597,17 +1635,37 @@ impl UnifiedExecProcessManager {
             output_closed = tracing::field::Empty,
         )
     )]
+    #[cfg(test)]
     pub(super) async fn collect_output_until_deadline<const MAX_BYTES: usize>(
+        output: &OutputHandles<MAX_BYTES>,
+        pause_state: Option<watch::Receiver<bool>>,
+        deadline: Instant,
+    ) -> HeadTailBuffer<MAX_BYTES> {
+        Self::collect_output_until_deadline_or_detached(
+            output,
+            pause_state,
+            deadline,
+            /*detach*/ None,
+        )
+        .await
+        .0
+    }
+
+    /// Collects output until `deadline`, or until `detach` changes, which leaves the process
+    /// running in the background. Returns the output and whether the wait was detached.
+    pub(super) async fn collect_output_until_deadline_or_detached<const MAX_BYTES: usize>(
         output: &OutputHandles<MAX_BYTES>,
         mut pause_state: Option<watch::Receiver<bool>>,
         mut deadline: Instant,
-    ) -> HeadTailBuffer<MAX_BYTES> {
+        mut detach: Option<watch::Receiver<u64>>,
+    ) -> (HeadTailBuffer<MAX_BYTES>, bool) {
         const POST_EXIT_CLOSE_WAIT_CAP: Duration = Duration::from_millis(50);
 
         enum StopReason {
             OutputClosed,
             Deadline,
             PostExitDeadline,
+            Detached,
         }
 
         let OutputHandles {
@@ -1681,6 +1739,7 @@ impl UnifiedExecProcessManager {
                     _ = &mut exit_notified => exit_signal_received = true,
                     _ = tokio::time::sleep(remaining) => break StopReason::Deadline,
                     _ = Self::wait_for_pause_change(pause_state.as_ref()) => {}
+                    _ = Self::wait_for_detach(detach.as_mut()) => break StopReason::Detached,
                 }
                 continue;
             }
@@ -1700,6 +1759,7 @@ impl UnifiedExecProcessManager {
                 StopReason::OutputClosed => "output_closed",
                 StopReason::Deadline => "deadline",
                 StopReason::PostExitDeadline => "post_exit_deadline",
+                StopReason::Detached => "detached",
             },
         );
         span.record(
@@ -1708,7 +1768,18 @@ impl UnifiedExecProcessManager {
         );
         span.record("output_closed", output_closed.load(Ordering::Acquire));
         span.record("outcome", "completed");
-        collected
+        (collected, matches!(stop_reason, StopReason::Detached))
+    }
+
+    async fn wait_for_detach(detach: Option<&mut watch::Receiver<u64>>) {
+        match detach {
+            Some(detach) => {
+                if detach.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+            None => std::future::pending::<()>().await,
+        }
     }
 
     async fn extend_deadlines_while_paused(
@@ -1833,6 +1904,8 @@ impl UnifiedExecProcessManager {
         };
 
         for entry in entries {
+            // Processes stopped with the session do not wake the model.
+            entry.process.set_notify_on_exit(false);
             unregister_network_approval_for_entry(&entry).await;
             entry.process.terminate();
         }
@@ -1876,6 +1949,8 @@ impl UnifiedExecProcessManager {
             (Arc::clone(&entry.process), entry.process.has_exited())
         };
 
+        // A process the user stopped does not wake the model.
+        process.set_notify_on_exit(false);
         if already_exited {
             // Stop the output producer even when only its inherited pipes remain open.
             process.terminate();

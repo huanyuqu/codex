@@ -96,6 +96,9 @@ pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     controller: Option<(ThreadId, Arc<dyn AgentControl>, watch::Receiver<bool>)>,
     mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
+    /// Notices about commands the model left running in the background, such as their exit,
+    /// waiting for the turn they start.
+    background_notices: Mutex<VecDeque<ResponseItem>>,
 }
 
 pub(crate) struct PendingMailboxCommunication {
@@ -111,7 +114,14 @@ impl InputQueue {
             activity_tx,
             controller: None,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            background_notices: Mutex::new(VecDeque::new()),
         }
+    }
+
+    /// Queues a notice about a background command, which starts a turn when the session is idle.
+    pub(crate) async fn enqueue_background_notice(&self, item: ResponseItem) {
+        self.background_notices.lock().await.push_back(item);
+        self.activity_tx.send_replace(InputQueueActivity::Mailbox);
     }
 
     pub(crate) fn with_controller(thread_id: ThreadId, control: Arc<dyn AgentControl>) -> Self {
@@ -220,6 +230,7 @@ impl InputQueue {
 
     pub(crate) async fn has_pending_mailbox_items(&self) -> bool {
         !self.mailbox_pending_mails.lock().await.is_empty()
+            || !self.background_notices.lock().await.is_empty()
             || self
                 .controller
                 .as_ref()
@@ -232,6 +243,7 @@ impl InputQueue {
             .await
             .iter()
             .any(|mail| mail.communication.trigger_turn)
+            || !self.background_notices.lock().await.is_empty()
     }
 
     pub(crate) async fn drain_mailbox(&self) -> Vec<PendingMailboxCommunication> {
@@ -267,10 +279,17 @@ impl InputQueue {
                     .filter(|id| !id.trim().is_empty())
             })
             .map(str::to_string);
-        let items = pending_mails
+        let mut items: Vec<TurnInput> = pending_mails
             .into_iter()
             .map(|mail| TurnInput::InterAgentCommunication(mail.communication))
             .collect();
+        items.extend(
+            self.background_notices
+                .lock()
+                .await
+                .drain(..)
+                .map(|item| TurnInput::ResponseItem(ResponseItemEnvelope::new(item))),
+        );
         (items, start_options)
     }
 

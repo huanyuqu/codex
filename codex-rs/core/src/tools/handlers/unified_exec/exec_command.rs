@@ -57,6 +57,8 @@ const EXEC_COMMAND_REJECTION_MAX_BYTES: usize = 900;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ExecCommandHandlerOptions {
+    /// Offer `background`, for sessions that live on after a turn to receive the exit notice.
+    pub(crate) include_background_parameter: bool,
     pub(crate) allow_tty: bool,
     pub(crate) exec_permission_approvals_enabled: bool,
     pub(crate) include_environment_id: bool,
@@ -79,6 +81,7 @@ impl Default for ExecCommandHandler {
         Self {
             lifetime: ExecCommandLifetime::Interactive,
             options: ExecCommandHandlerOptions {
+                include_background_parameter: true,
                 allow_tty: true,
                 exec_permission_approvals_enabled: false,
                 include_environment_id: false,
@@ -118,6 +121,9 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
             self.options.include_windows_shell_guidance,
         );
         let mut spec = match self.lifetime {
+            ExecCommandLifetime::Interactive if self.options.include_background_parameter => {
+                background_exec_command_spec(spec)
+            }
             ExecCommandLifetime::Interactive => spec,
             ExecCommandLifetime::OneShot => one_shot_exec_command_spec(spec),
         };
@@ -281,6 +287,7 @@ impl ExecCommandHandler {
         let command = resolved_command.command;
         let ExecCommandArgs {
             mut tty,
+            background,
             yield_time_ms,
             timeout_ms,
             max_output_tokens,
@@ -381,6 +388,7 @@ impl ExecCommandHandler {
                 original_token_count: None,
                 output_omitted_bytes: None,
                 hook_command: None,
+                note: None,
             }));
         }
 
@@ -397,6 +405,8 @@ impl ExecCommandHandler {
         // Preparation can be cancelled. Reserve a process only once it is done.
         let process_id = manager.allocate_process_id().await;
         let request = ExecCommandRequest {
+            // Only sessions that outlive the turn can tell the model about the exit later.
+            background: background && self.options.include_background_parameter,
             command,
             shell: resolved_command.shell,
             hook_command: hook_command.clone(),
@@ -447,6 +457,7 @@ impl ExecCommandHandler {
                     original_token_count: Some(original_token_count),
                     output_omitted_bytes,
                     hook_command: Some(hook_command),
+                    note: None,
                 }))
             }
             Err(err) => {
@@ -458,6 +469,31 @@ impl ExecCommandHandler {
             }
         }
     }
+}
+
+/// The spec with `background`, and the promise that commands left running report their exit.
+fn background_exec_command_spec(spec: ToolSpec) -> ToolSpec {
+    let ToolSpec::Function(mut spec) = spec else {
+        unreachable!("exec_command has a function schema");
+    };
+    spec.description = spec.description.replacen(
+        "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+        "Runs a command in a PTY, returning output or a session ID for ongoing interaction. Set \
+         background for long commands such as builds, test suites or servers: the call returns \
+         at once with a session ID, the command runs on, and you get a message with its exit \
+         code and output when it exits. Do not poll it; continue with other work, or end your \
+         turn and pick up the result when the message arrives.",
+        1,
+    );
+    spec.parameters.properties.get_or_insert_default().insert(
+        "background".to_string(),
+        JsonSchema::boolean(Some(
+            "Return right away with a session ID instead of waiting for output. You get a \
+             message when the command exits."
+                .to_string(),
+        )),
+    );
+    ToolSpec::Function(spec)
 }
 
 fn one_shot_exec_command_spec(spec: ToolSpec) -> ToolSpec {

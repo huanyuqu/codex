@@ -15,6 +15,7 @@ use super::process::UnifiedExecProcess;
 use super::take_plugin_metrics_sidecar;
 use crate::exec::MAX_EXEC_OUTPUT_DELTAS_PER_CALL;
 use crate::plugins::metrics::finish_and_track_measurements;
+use crate::session::background_commands::BackgroundCommandExit;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::events::ToolEmitter;
@@ -159,6 +160,7 @@ pub(crate) fn spawn_exit_watcher(
     process: Arc<UnifiedExecProcess>,
     context: &UnifiedExecContext,
     command: Vec<String>,
+    display_command: String,
     cwd: PathUri,
     process_id: i32,
     plugin_attribution: Option<PluginCommandAttribution>,
@@ -191,6 +193,20 @@ pub(crate) fn spawn_exit_watcher(
         let plugin_metrics_sidecar = plugin_metrics_sidecar
             .as_ref()
             .and_then(take_plugin_metrics_sidecar);
+        // The model left the command running and has not seen it exit: tell it.
+        if process.notify_on_exit() {
+            process.set_notify_on_exit(false);
+            let output = resolve_aggregated_output(&output_buffer, String::new()).await;
+            let exit = BackgroundCommandExit {
+                process_id,
+                command: display_command,
+                exit_code: process.exit_code(),
+                failure: process.failure_message(),
+                duration,
+                output,
+            };
+            crate::session::background_commands::notify_command_exit(&session_ref, exit).await;
+        }
         if let Some(message) = process.failure_message() {
             drop(plugin_metrics_sidecar);
             emit_failed_exec_end_for_unified_exec(

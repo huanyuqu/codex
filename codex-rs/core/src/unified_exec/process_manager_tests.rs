@@ -461,6 +461,7 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
         "call-unified-denied".to_string(),
     );
     let request = ExecCommandRequest {
+        background: false,
         command: vec![
             "sh".to_string(),
             "-lc".to_string(),

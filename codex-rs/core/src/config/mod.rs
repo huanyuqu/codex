@@ -1127,6 +1127,9 @@ pub struct Config {
     /// Default: `300000` (5 minutes).
     pub background_terminal_max_timeout: u64,
 
+    /// Whether a background command that exits starts a turn in an idle session.
+    pub background_terminal_wake: bool,
+
     /// Idle timeout for unsubscribed app-server threads, resolved at server startup.
     pub thread_unload_delay: Duration,
 
@@ -4032,6 +4035,7 @@ impl Config {
             .background_terminal_max_timeout
             .unwrap_or(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
             .max(MIN_EMPTY_YIELD_TIME_MS);
+        let background_terminal_wake = cfg.background_terminal_wake.unwrap_or(true);
         let thread_unload_delay =
             Duration::from_secs(cfg.thread_unload_delay_secs.unwrap_or(/*default*/ 1800));
         if std::time::Instant::now()
@@ -4599,6 +4603,7 @@ impl Config {
             tool_registry,
             code_mode,
             background_terminal_max_timeout,
+            background_terminal_wake,
             thread_unload_delay,
             ghost_snapshot,
             multi_agent_v2,

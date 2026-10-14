@@ -45,6 +45,9 @@ pub(crate) struct ExecCommandArgs {
     justification: Option<String>,
     #[serde(default)]
     prefix_rule: Option<Vec<String>>,
+    /// Return right away and tell the model when the command exits.
+    #[serde(default)]
+    pub(crate) background: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -391,6 +391,9 @@ pub struct ExecCommandToolOutput {
     /// Bytes omitted by the output collection cap before model-facing truncation.
     pub output_omitted_bytes: Option<NonZeroUsize>,
     pub hook_command: Option<String>,
+    /// What the model should know about a command that goes on running, such as that it will be
+    /// told when the command exits.
+    pub note: Option<String>,
 }
 
 impl ToolOutput for ExecCommandToolOutput {
@@ -537,6 +540,10 @@ impl ExecCommandToolOutput {
 
         if let Some(process_id) = &self.process_id {
             sections.push(format!("Process running with session ID {process_id}"));
+        }
+
+        if let Some(note) = &self.note {
+            sections.push(note.clone());
         }
 
         if let Some(original_token_count) = self.original_token_count {

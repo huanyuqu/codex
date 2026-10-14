@@ -944,6 +944,15 @@ impl CodexThread {
         self.session.terminate_background_terminal(process_id).await
     }
 
+    /// Moves the commands the current turn is waiting on to the background: their calls return
+    /// at once, the commands go on, and the model is told when they exit.
+    pub fn detach_waiting_commands(&self) {
+        self.session
+            .services
+            .unified_exec_manager
+            .detach_waiting_commands();
+    }
+
     pub(crate) fn subscribe_status(&self) -> watch::Receiver<AgentStatus> {
         self.io.agent_status.clone()
     }

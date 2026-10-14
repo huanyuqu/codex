@@ -1253,6 +1253,11 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
         && context.tool_policy.expose_additional_permissions;
     let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
     let options = ExecCommandHandlerOptions {
+        // `codex exec` ends with its turn, so a command left running could not report back.
+        include_background_parameter: !matches!(
+            turn_context.session_source,
+            codex_protocol::protocol::SessionSource::Exec
+        ),
         allow_tty: features.enabled(Feature::UnifiedExecTty),
         exec_permission_approvals_enabled,
         include_environment_id,

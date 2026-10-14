@@ -423,9 +423,16 @@ pub struct TestCodexBuilder {
     models_manager: Option<SharedModelsManager>,
     thread_store: Option<Arc<dyn ThreadStore>>,
     image_store: Arc<dyn AttachmentStore>,
+    session_source: SessionSource,
 }
 
 impl TestCodexBuilder {
+    /// Runs the sessions as if started by `session_source`; `codex exec` by default.
+    pub fn with_session_source(mut self, session_source: SessionSource) -> Self {
+        self.session_source = session_source;
+        self
+    }
+
     pub fn with_thread_store(mut self, thread_store: Arc<dyn ThreadStore>) -> Self {
         self.thread_store = Some(thread_store);
         self
@@ -863,7 +870,7 @@ impl TestCodexBuilder {
                 auth_manager.clone(),
                 models_manager,
                 codex_core::CodexAppsToolsCache::default(),
-                SessionSource::Exec,
+                self.session_source.clone(),
                 Arc::clone(&environment_manager),
                 Arc::new(extensions.build()),
                 user_instructions_provider,
@@ -1534,6 +1541,7 @@ pub fn test_codex() -> TestCodexBuilder {
                 .expect("test config should allow ShellSnapshot override");
         })],
         auth: TestAuth::Cached(CodexAuth::from_api_key("dummy")),
+        session_source: SessionSource::Exec,
         analytics_events_client: None,
         pre_build_hooks: vec![],
         workspace_setups: vec![],

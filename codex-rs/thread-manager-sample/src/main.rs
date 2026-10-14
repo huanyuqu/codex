@@ -377,6 +377,7 @@ async fn new_config(
         tool_registry: Default::default(),
         code_mode: Default::default(),
         background_terminal_max_timeout: 300_000,
+        background_terminal_wake: true,
         thread_unload_delay: std::time::Duration::from_secs(/*secs*/ 1800),
         ghost_snapshot: GhostSnapshotConfig::default(),
         multi_agent_v2: MultiAgentV2Config::default(),
