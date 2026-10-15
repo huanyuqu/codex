@@ -127,7 +127,7 @@ pub struct ModelCall {
 impl ModelCall {
     fn new(model: &dyn ShadowModel, started: Instant) -> Self {
         Self {
-            model: model.name().to_string(),
+            model: model.name(),
             latency_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             ..Self::default()
         }
@@ -480,7 +480,7 @@ impl Recaller {
         candidates: &[usize],
         stats: &mut RecallStats,
     ) -> anyhow::Result<Vec<f32>> {
-        stats.scorer = Some(scorer.name().to_string());
+        stats.scorer = Some(scorer.name());
         stats.scored = candidates.len();
         stats.candidates = candidates.len();
         let documents = candidate_documents(history, candidates);

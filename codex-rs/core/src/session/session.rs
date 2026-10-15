@@ -1242,6 +1242,10 @@ impl Session {
                 session_configuration
                     .provider
                     .memory_extraction_preferred_model(),
+                session_configuration
+                    .step_settings
+                    .collaboration_mode
+                    .model(),
                 thread_id,
                 session_configuration.forked_from_thread_id,
                 live_thread.as_ref(),

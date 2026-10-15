@@ -1,6 +1,7 @@
 //! Shadow agent models that call the session's own model client.
 
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::Weak;
 use std::time::Duration;
 
@@ -33,15 +34,37 @@ const ATTACH_TIMEOUT: Duration = Duration::from_secs(30);
 /// the same provider, with the same authentication and data controls, as the session.
 pub(crate) struct SessionShadowModel {
     session: watch::Sender<Option<Weak<Session>>>,
-    model: String,
+    model: ShadowTarget,
+}
+
+/// The model a [`SessionShadowModel`] calls.
+enum ShadowTarget {
+    Fixed(String),
+    /// The model the session's turns use at the time of each request, so that it follows when
+    /// the user switches models; holds the latest one.
+    Session(StdMutex<String>),
 }
 
 impl SessionShadowModel {
     pub(crate) fn new(model: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
             session: watch::Sender::new(None),
-            model: model.into(),
+            model: ShadowTarget::Fixed(model.into()),
         })
+    }
+
+    /// A model that calls whichever model the session's turns use, starting with
+    /// `session_model`.
+    pub(crate) fn following_session(session_model: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
+            session: watch::Sender::new(None),
+            model: ShadowTarget::Session(StdMutex::new(session_model.into())),
+        })
+    }
+
+    /// Whether it calls `model` whatever model the session uses.
+    pub(crate) fn is_fixed_to(&self, model: &str) -> bool {
+        matches!(&self.model, ShadowTarget::Fixed(fixed) if fixed == model)
     }
 
     /// Connects the model to its session once the session exists. Requests wait for this, and
@@ -65,8 +88,14 @@ impl SessionShadowModel {
 }
 
 impl ShadowModel for SessionShadowModel {
-    fn name(&self) -> &str {
-        &self.model
+    fn name(&self) -> String {
+        match &self.model {
+            ShadowTarget::Fixed(model) => model.clone(),
+            ShadowTarget::Session(latest) => latest
+                .lock()
+                .map(|latest| latest.clone())
+                .unwrap_or_default(),
+        }
     }
 
     fn complete<'a>(
@@ -75,7 +104,17 @@ impl ShadowModel for SessionShadowModel {
     ) -> BoxFuture<'a, anyhow::Result<ModelCompletion>> {
         Box::pin(async move {
             let session = self.session().await?;
-            session.complete_shadow_prompt(&self.model, prompt).await
+            let model = match &self.model {
+                ShadowTarget::Fixed(model) => model.clone(),
+                ShadowTarget::Session(latest) => {
+                    let model = session.thread_config_snapshot().await.model;
+                    if let Ok(mut latest) = latest.lock() {
+                        latest.clone_from(&model);
+                    }
+                    model
+                }
+            };
+            session.complete_shadow_prompt(&model, prompt).await
         })
     }
 }

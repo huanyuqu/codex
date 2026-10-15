@@ -168,8 +168,8 @@ pub fn parse_response(text: &str) -> anyhow::Result<ModelCompletion> {
 }
 
 impl ShadowModel for ResponsesModel {
-    fn name(&self) -> &str {
-        &self.model
+    fn name(&self) -> String {
+        self.model.clone()
     }
 
     fn complete<'a>(

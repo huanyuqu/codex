@@ -400,7 +400,8 @@ pub struct ContextGraphToml {
     pub mode: Option<ContextMode>,
     /// Model that writes block cards. Defaults to the provider's memory extraction model.
     pub index_model: Option<String>,
-    /// Model that screens cards to choose context. Defaults to the indexing model.
+    /// Model that screens cards to choose context. Defaults to the model the session's turns
+    /// use, and follows when the user switches models.
     pub screen_model: Option<String>,
     /// Model that reads blocks whose cards were not enough to decide. Defaults to the screening
     /// model; `"none"` skips reading.

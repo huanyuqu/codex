@@ -156,8 +156,8 @@ fn batch_blocks(input: &str) -> Vec<(String, String)> {
 }
 
 impl ShadowModel for FakeModel {
-    fn name(&self) -> &str {
-        "fake-model"
+    fn name(&self) -> String {
+        "fake-model".to_string()
     }
 
     fn complete<'a>(

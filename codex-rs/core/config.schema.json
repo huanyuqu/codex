@@ -1530,7 +1530,7 @@
           "description": "How recall screens the cards: `listwise` (default), `pointwise` or `cascade`."
         },
         "screen_model": {
-          "description": "Model that screens cards to choose context. Defaults to the indexing model.",
+          "description": "Model that screens cards to choose context. Defaults to the model the session's turns use, and follows when the user switches models.",
           "type": "string"
         },
         "soft_limit_percent": {

@@ -15,7 +15,7 @@ pub struct ModelCompletion {
 /// A model that answers [`ModelPrompt`]s with JSON that follows their schema.
 pub trait ShadowModel: Send + Sync {
     /// The name recorded with the cards and views it produces, such as its model slug.
-    fn name(&self) -> &str;
+    fn name(&self) -> String;
 
     fn complete<'a>(
         &'a self,

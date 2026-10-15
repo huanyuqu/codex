@@ -23,7 +23,7 @@ const MODEL_BATCH: usize = 25;
 /// Scores how likely a request needs each block, from the text of its card.
 pub trait RelevanceScorer: Send + Sync {
     /// The name recorded with the views it helped build.
-    fn name(&self) -> &str;
+    fn name(&self) -> String;
 
     fn score<'a>(
         &'a self,
@@ -44,7 +44,7 @@ impl ModelScorer {
 }
 
 impl RelevanceScorer for ModelScorer {
-    fn name(&self) -> &str {
+    fn name(&self) -> String {
         self.model.name()
     }
 
@@ -119,8 +119,8 @@ struct RerankResult {
 }
 
 impl RelevanceScorer for RerankScorer {
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> String {
+        self.name.clone()
     }
 
     fn score<'a>(

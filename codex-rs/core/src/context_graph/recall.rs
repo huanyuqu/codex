@@ -707,7 +707,7 @@ impl ContextGraphService {
             })
             .collect();
         Ok(RecallPreview {
-            selector: self.screen_model.name().to_string(),
+            selector: self.screen_model.name(),
             recall,
             titles,
         })
@@ -774,7 +774,7 @@ impl ContextGraphService {
             &history,
             self.view_limits(TOOL_RECALL_BUDGET_TOKENS, /*recent_turns*/ 0),
         );
-        self.record_view(question, self.screen_model.name(), &recall)
+        self.record_view(question, &self.screen_model.name(), &recall)
             .await;
         let picked: Vec<String> = recall
             .view
@@ -993,7 +993,7 @@ pub(crate) async fn recall_into_history(
                     sess,
                     step_context,
                     &question,
-                    service.screen_model.name(),
+                    &service.screen_model.name(),
                     &recall,
                     append.is_none(),
                 )
@@ -1062,7 +1062,7 @@ pub(crate) async fn add_finished_recall(sess: &Arc<Session>, step_context: &Arc<
             sess,
             step_context,
             &question,
-            service.screen_model.name(),
+            &service.screen_model.name(),
             &recall,
             /*rebuilt*/ false,
         )

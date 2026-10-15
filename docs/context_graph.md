@@ -170,6 +170,12 @@ history by words, `context_expand` reads a block or a whole turn in full, and
 `context_recall` asks the screening model for the parts of the history a
 question needs.
 
+Recall screens with the model the chat uses, and follows when you switch models
+with `/model`: choosing what a request needs from a long history is about as
+hard as answering it, and in our probe benchmark a smaller screening model
+picked noticeably worse. Set `screen_model` to a cheaper model to spend less;
+each screening reads the cards of the earlier history.
+
 When the screening is unsure, because the request refers to something the
 cards do not show, chains several earlier steps, or leaves many blocks
 undecided, `escalate_model` screens again with the same prompt. A history too
@@ -203,7 +209,7 @@ shows its summary with a note instead of its stale contents.
 [context_graph]
 mode = "auto"
 index_model = "gpt-6-luna"      # writes cards; defaults to the provider's memory model
-screen_model = "gpt-6-luna"     # picks blocks; defaults to index_model
+screen_model = "gpt-6-luna"     # picks blocks; defaults to the model the chat uses
 read_model = "none"             # reads blocks the cards cannot decide; defaults to screen_model
 recall_budget_tokens = 40000
 recent_turns = 2
@@ -278,15 +284,20 @@ Deleting a conversation deletes what the graph derived from it.
 turn, and runs probe benchmarks that compare recall with the full history and
 other selectors. Run it with `--help` for the commands.
 
-`probe-run --conditions` takes `full`, `window`, `bm25`, `oracle` and
-`recall:SCREEN[+READ|+none]`. A recall condition can end in `@pointwise` or
-`@cascade` to screen that way, and in `@lexN` to give lexical matches N percent
-of the budget, so one run can compare, for example,
+`probe-run --conditions` takes `full`, `window`, `bm25`, `oracle`,
+`oracle@budget` and `recall:SCREEN[+READ|+none]`. The oracle shows the probe's
+support blocks in full, as an upper bound for selection; `oracle@budget` fits
+them in the view budget like recall, which may shorten them. A recall condition
+can end in `@pointwise` or `@cascade` to screen that way, and in `@lexN` to give
+lexical matches N percent of the budget, so one run can compare, for example,
 `recall:luna+none,recall:luna+none@lex0,recall:luna+none@cascade`.
 `probe-report` shows, for each condition, the score, the share of support
 blocks shown (the selection's recall), and the share of the earlier blocks
 shown that are support (its precision). `--valid-only` counts only probes that
-the oracle context answers and the recent turns alone do not.
+the oracle context answers and the recent turns alone do not. Probes run session
+by session and turn by turn, and of the probes that share a prompt prefix, the
+same session at the same turn under the same condition, one runs first, so that
+the rest read the prefix from the provider's prompt cache.
 
 `probe-gen --at 0.5,1` asks probes halfway through each session and at its
 end, so that answers about earlier work are not overtaken by later turns.

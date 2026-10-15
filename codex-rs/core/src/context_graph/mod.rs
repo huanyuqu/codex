@@ -92,6 +92,7 @@ impl ContextGraphStart {
 pub(crate) async fn start(
     config: &Config,
     provider_index_model: &str,
+    session_model: &str,
     thread_id: ThreadId,
     forked_from: Option<ThreadId>,
     live_thread: Option<&LiveThread>,
@@ -118,7 +119,7 @@ pub(crate) async fn start(
     // to extracted cards, which never leave the machine.
     let index_model = (config.features.enabled(Feature::ContextGraphIndexing)
         && config.memories.generate_memories)
-        .then(|| SessionShadowModel::new(index_model_name.clone()));
+        .then(|| SessionShadowModel::new(index_model_name));
     start.models.extend(index_model.clone());
 
     let thread = thread_id.to_string();
@@ -182,29 +183,32 @@ pub(crate) async fn start(
         return start;
     }
 
-    let screen_name = settings
-        .screen_model
-        .clone()
-        .unwrap_or_else(|| index_model_name.clone());
-    let mut model = |name: &str| match &index_model {
-        Some(model) if model.name() == name => Arc::clone(model),
+    // A named model, shared with indexing when it is the indexing model; unnamed, the model the
+    // session's turns use.
+    let mut model = |name: Option<&str>| match (name, &index_model) {
+        (Some(name), Some(model)) if model.is_fixed_to(name) => Arc::clone(model),
         _ => {
-            let model = SessionShadowModel::new(name);
+            let model = match name {
+                Some(name) => SessionShadowModel::new(name),
+                None => SessionShadowModel::following_session(session_model),
+            };
             start.models.push(Arc::clone(&model));
             model
         }
     };
-    let screen_model = model(&screen_name);
+    // Choosing what a request needs is as hard as answering it, so recall screens with the
+    // session's own model unless configured otherwise.
+    let screen_model = model(settings.screen_model.as_deref());
     let read_model = match settings.read_model.as_deref() {
         Some("none") => None,
-        Some(name) if name != screen_name => Some(model(name)),
+        Some(name) if !screen_model.is_fixed_to(name) => Some(model(Some(name))),
         _ => Some(Arc::clone(&screen_model)),
     };
     let escalate_model = settings
         .escalate_model
         .as_deref()
-        .filter(|name| *name != screen_name)
-        .map(&mut model);
+        .filter(|name| !screen_model.is_fixed_to(name))
+        .map(|name| model(Some(name)));
     let scorer: Option<Arc<dyn RelevanceScorer>> = match settings.screen {
         RecallScreen::Listwise => None,
         RecallScreen::Pointwise | RecallScreen::Cascade => Some(match &settings.rerank_url {

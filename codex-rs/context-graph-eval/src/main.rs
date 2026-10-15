@@ -22,6 +22,8 @@ use codex_context_graph_eval::bench::Condition;
 use codex_context_graph_eval::bench::ContextBuilder;
 use codex_context_graph_eval::bench::ProbeResult;
 use codex_context_graph_eval::bench::answer_and_judge;
+use codex_context_graph_eval::bench::cache_groups;
+use codex_context_graph_eval::bench::run_cache_groups;
 use codex_context_graph_eval::probe::Probe;
 use codex_context_graph_eval::probe::append_jsonl;
 use codex_context_graph_eval::probe::build_generation_prompt;
@@ -257,9 +259,11 @@ struct ProbeRunArgs {
     #[arg(long)]
     probes: PathBuf,
 
-    /// Comma-separated conditions: full, window, bm25, oracle, recall:SCREEN[+READ|+none], where
-    /// recall can end in @pointwise or @cascade to screen that way and @lexN to give lexical
-    /// matches N percent of the budget.
+    /// Comma-separated conditions: full, window, bm25, oracle, oracle@budget and
+    /// recall:SCREEN[+READ|+none], where recall can end in @pointwise or @cascade to screen that
+    /// way and @lexN to give lexical matches N percent of the budget. The oracle shows the support
+    /// blocks in full; oracle@budget fits them in the budget like recall. Probes run session by
+    /// session, so that those sharing a prompt prefix read it from the provider's cache.
     #[arg(long, value_delimiter = ',')]
     conditions: Vec<String>,
 
@@ -755,13 +759,15 @@ async fn probe_run(store: &LocalContextGraphStore, args: ProbeRunArgs) -> anyhow
         .collect();
     let total = tasks.len();
     eprintln!("{total} answers to run");
-    let mut results = futures::stream::iter(tasks.into_iter().map(|(probe, condition)| {
-        let sessions = &sessions;
-        let recallers = &recallers;
-        let builder = &builder;
-        let answer_model = &answer_model;
-        let judge_model = &judge_model;
-        async move {
+    let sessions = &sessions;
+    let recallers = &recallers;
+    let builder = &builder;
+    let answer_model = &answer_model;
+    let judge_model = &judge_model;
+    let results = run_cache_groups(
+        cache_groups(tasks, &conditions),
+        args.concurrency,
+        |(probe, condition): (&Probe, &Condition)| async move {
             let result = async {
                 let session = sessions.get(&probe.rollout).context("session not loaded")?;
                 let history = session.history(Some(probe.turn));
@@ -771,9 +777,9 @@ async fn probe_run(store: &LocalContextGraphStore, args: ProbeRunArgs) -> anyhow
             }
             .await;
             (probe, condition, result)
-        }
-    }))
-    .buffer_unordered(args.concurrency.max(1));
+        },
+    );
+    let mut results = std::pin::pin!(results);
     let mut finished = 0;
     while let Some((probe, condition, result)) = results.next().await {
         finished += 1;

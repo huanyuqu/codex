@@ -45,8 +45,8 @@ impl ScriptedModel {
 }
 
 impl ShadowModel for ScriptedModel {
-    fn name(&self) -> &str {
-        "scripted"
+    fn name(&self) -> String {
+        "scripted".to_string()
     }
 
     fn complete<'a>(
@@ -338,8 +338,8 @@ struct FixedModel {
 }
 
 impl ShadowModel for FixedModel {
-    fn name(&self) -> &str {
-        self.name
+    fn name(&self) -> String {
+        self.name.to_string()
     }
 
     fn complete<'a>(
@@ -366,8 +366,8 @@ impl ShadowModel for FixedModel {
 struct FixedScorer(Vec<f32>);
 
 impl RelevanceScorer for FixedScorer {
-    fn name(&self) -> &str {
-        "fixed"
+    fn name(&self) -> String {
+        "fixed".to_string()
     }
 
     fn score<'a>(

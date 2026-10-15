@@ -338,7 +338,7 @@ impl ShadowIndexer {
             return;
         };
         let mut request = IndexRequest {
-            indexer: model.name().to_string(),
+            indexer: model.name(),
             blocks: u32::try_from(batch.entries.len()).unwrap_or(u32::MAX),
             latency_ms: u64::try_from(latency.as_millis()).unwrap_or(u64::MAX),
             ..IndexRequest::default()

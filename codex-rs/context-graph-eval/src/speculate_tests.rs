@@ -18,8 +18,8 @@ struct SecondCard {
 }
 
 impl ShadowModel for SecondCard {
-    fn name(&self) -> &str {
-        "second-card"
+    fn name(&self) -> String {
+        "second-card".to_string()
     }
 
     fn complete<'a>(

@@ -6,9 +6,11 @@ use codex_core::TurnInputRequest;
 use codex_features::Feature;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use std::time::Duration;
 
+use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
@@ -611,5 +613,88 @@ async fn the_recall_of_a_draft_becomes_the_recall_of_the_request() -> Result<()>
             .count(),
         1
     );
+    Ok(())
+}
+
+/// Without `screen_model`, recall screens with the model the chat uses, and follows when the
+/// user switches models.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recall_screens_with_the_model_the_chat_uses() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let screening = json!({
+        "selected": [{ "card": "C1", "detail": "full", "reason": "states the API constraint" }],
+        "uncertain": []
+    })
+    .to_string();
+    let requests = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_assistant_message("m1", "Retries added."),
+                ev_completed("r1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("m2", "Timeout added."),
+                ev_completed("r2"),
+            ]),
+            sse(vec![
+                ev_assistant_message("m3", &screening),
+                ev_completed("r3"),
+            ]),
+            sse(vec![
+                ev_assistant_message("m4", &screening),
+                ev_completed("r4"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    provider.base_url = Some(format!("{}/v1", server.uri()));
+    provider.supports_websockets = false;
+    let mut builder = test_codex().with_config(move |config| {
+        config.model = Some("gpt-5.2".to_string());
+        config.model_provider = provider;
+        config
+            .features
+            .enable(Feature::ContextGraph)
+            .unwrap_or_else(|err| panic!("enable context_graph: {err}"));
+        config.context_graph.mode = ContextMode::Full;
+        config.context_graph.recent_turns = 1;
+        config.context_graph.read_model = Some("none".to_string());
+        config.context_graph.speculative_recall = false;
+    });
+    let test = builder.build(&server).await?;
+    turn(&test.codex, FIRST_REQUEST).await?;
+    turn(&test.codex, SECOND_REQUEST).await?;
+
+    let question = "What did we agree about the public API?";
+    let before = test.codex.preview_context_recall(question).await?;
+    core_test_support::submit_thread_settings(
+        &test.codex,
+        ThreadSettingsOverrides {
+            model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let after = test.codex.preview_context_recall(question).await?;
+
+    assert_eq!(
+        (before.selector.as_str(), after.selector.as_str()),
+        ("gpt-5.2", "gpt-5.4")
+    );
+    let screenings: Vec<String> = requests
+        .requests()
+        .iter()
+        .map(ResponsesRequest::body_json)
+        .filter(|body| {
+            body.to_string()
+                .contains("You choose the context a coding agent gets")
+        })
+        .map(|body| body["model"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(screenings, vec!["gpt-5.2", "gpt-5.4"]);
     Ok(())
 }

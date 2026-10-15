@@ -15,8 +15,8 @@ use crate::model::ModelCompletion;
 struct CountingModel;
 
 impl ShadowModel for CountingModel {
-    fn name(&self) -> &str {
-        "counting"
+    fn name(&self) -> String {
+        "counting".to_string()
     }
 
     fn complete<'a>(

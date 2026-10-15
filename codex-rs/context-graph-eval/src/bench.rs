@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::future::Future;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,6 +20,7 @@ use codex_context_graph::view::Pick;
 use codex_context_graph::view::Presentation;
 use codex_context_graph::view::Reason;
 use codex_context_graph::view::ViewEntry;
+use codex_context_graph::view::ViewLimits;
 use codex_context_graph::view::entry_text;
 use codex_context_graph::view::plan_view;
 use codex_context_graph::view::render_transcript;
@@ -28,9 +31,12 @@ use codex_context_graph_store::RecallStats;
 use codex_context_graph_store::Recaller;
 use codex_context_graph_store::ScreenStrategy;
 use codex_context_graph_store::ShadowModel;
+use futures::Stream;
+use futures::StreamExt as _;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
+use tokio::sync::Semaphore;
 
 use crate::probe::Probe;
 
@@ -57,23 +63,26 @@ pub enum Condition {
         /// when it differs from the run's.
         lexical_share: Option<u8>,
     },
-    /// The probe's support blocks, as an upper bound for selection.
-    Oracle,
+    /// The probe's support blocks, in full up to `max_full_tokens`, as an upper bound for
+    /// selection; with `budgeted`, within the view budget like recall, so that they may be
+    /// shortened.
+    Oracle { budgeted: bool },
 }
 
 impl FromStr for Condition {
     type Err = anyhow::Error;
 
-    /// Parses `full`, `window`, `bm25`, `oracle`, `recall:SCREEN` (reads with the screening
-    /// model), `recall:SCREEN+READ` or `recall:SCREEN+none`. A recall condition can end in
-    /// options: `@pointwise` or `@cascade` to screen that way, and `@lexN` to give lexical
-    /// matches N percent of the budget, such as `@lex0` for none.
+    /// Parses `full`, `window`, `bm25`, `oracle`, `oracle@budget`, `recall:SCREEN` (reads with
+    /// the screening model), `recall:SCREEN+READ` or `recall:SCREEN+none`. A recall condition
+    /// can end in options: `@pointwise` or `@cascade` to screen that way, and `@lexN` to give
+    /// lexical matches N percent of the budget, such as `@lex0` for none.
     fn from_str(name: &str) -> anyhow::Result<Self> {
         Ok(match name {
             "full" => Self::Full,
             "window" => Self::Window,
             "bm25" => Self::Bm25,
-            "oracle" => Self::Oracle,
+            "oracle" => Self::Oracle { budgeted: false },
+            "oracle@budget" => Self::Oracle { budgeted: true },
             _ => {
                 let recall = name
                     .strip_prefix("recall:")
@@ -125,7 +134,8 @@ impl fmt::Display for Condition {
             Self::Full => write!(f, "full"),
             Self::Window => write!(f, "window"),
             Self::Bm25 => write!(f, "bm25"),
-            Self::Oracle => write!(f, "oracle"),
+            Self::Oracle { budgeted: false } => write!(f, "oracle"),
+            Self::Oracle { budgeted: true } => write!(f, "oracle@budget"),
             Self::Recall {
                 screen,
                 read,
@@ -210,7 +220,7 @@ impl ContextBuilder {
                     .collect();
                 plan_view(history, &picks, self.config.view)
             }
-            Condition::Oracle => {
+            Condition::Oracle { budgeted } => {
                 let picks: Vec<Pick> = probe
                     .support
                     .iter()
@@ -221,7 +231,15 @@ impl ContextBuilder {
                         note: None,
                     })
                     .collect();
-                plan_view(history, &picks, self.config.view)
+                let limits = if *budgeted {
+                    self.config.view
+                } else {
+                    ViewLimits {
+                        budget_tokens: self.max_full_tokens,
+                        ..self.config.view
+                    }
+                };
+                plan_view(history, &picks, limits)
             }
             Condition::Recall { .. } => {
                 let recaller = recaller.context("recall needs a recaller")?;
@@ -316,6 +334,76 @@ fn from_view(history: &History<'_>, view: &ContextView) -> ProbeContext {
         recall: None,
         truncated: false,
     }
+}
+
+/// Orders probe tasks so that those that share a prompt prefix run together, and returns the
+/// runs of tasks that share one. Sessions come in the order they first appear, then turns,
+/// conditions in the order given, and probes. Under one condition, the probes asked of a
+/// session at the same turn share its transcript, or its catalog of cards, before the
+/// question; and a later turn's full history extends an earlier one's.
+pub fn cache_groups<'a>(
+    mut tasks: Vec<(&'a Probe, &'a Condition)>,
+    conditions: &[Condition],
+) -> Vec<Vec<(&'a Probe, &'a Condition)>> {
+    let mut sessions: Vec<&Path> = Vec::new();
+    for &(probe, _) in &tasks {
+        if !sessions.contains(&probe.rollout.as_path()) {
+            sessions.push(&probe.rollout);
+        }
+    }
+    let key = |(probe, condition): &(&Probe, &Condition)| {
+        (
+            sessions
+                .iter()
+                .position(|session| *session == probe.rollout.as_path()),
+            probe.turn,
+            conditions.iter().position(|known| known == *condition),
+        )
+    };
+    tasks.sort_by(|a, b| key(a).cmp(&key(b)).then_with(|| a.0.id.cmp(&b.0.id)));
+    tasks
+        .chunk_by(|a, b| key(a) == key(b))
+        .map(<[_]>::to_vec)
+        .collect()
+}
+
+/// Runs `run` on the tasks of `groups`, at most `concurrency` at once, and yields the results
+/// as they finish. The rest of a group starts once its first task has finished, so that they
+/// read the prefix they share from the provider's prompt cache instead of each writing it.
+pub fn run_cache_groups<T, R, F, Fut>(
+    groups: Vec<Vec<T>>,
+    concurrency: usize,
+    run: F,
+) -> impl Stream<Item = R>
+where
+    F: Fn(T) -> Fut + Clone,
+    Fut: Future<Output = R>,
+{
+    let concurrency = concurrency.max(1);
+    let permits = Arc::new(Semaphore::new(concurrency));
+    futures::stream::iter(groups)
+        .map(move |group| {
+            let permits = Arc::clone(&permits);
+            let run = run.clone();
+            let limited = move |task: T| {
+                let permits = Arc::clone(&permits);
+                let run = run.clone();
+                async move {
+                    let _permit = permits.acquire().await.ok();
+                    run(task).await
+                }
+            };
+            let mut tasks = group.into_iter();
+            let first = tasks.next();
+            Box::pin(
+                futures::stream::iter(first).then(limited.clone()).chain(
+                    futures::stream::iter(tasks)
+                        .map(limited)
+                        .buffer_unordered(concurrency),
+                ),
+            )
+        })
+        .flatten_unordered(concurrency)
 }
 
 /// The answer to a probe under one condition, graded.
@@ -494,7 +582,7 @@ async fn complete<T: serde::de::DeserializeOwned>(
     let started = Instant::now();
     let completion: ModelCompletion = model.complete(&prompt).await?;
     let call = ModelCall {
-        model: model.name().to_string(),
+        model: model.name(),
         input_tokens: completion.input_tokens,
         cached_input_tokens: completion.cached_input_tokens,
         output_tokens: completion.output_tokens,

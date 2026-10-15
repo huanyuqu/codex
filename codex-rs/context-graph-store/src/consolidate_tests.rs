@@ -81,8 +81,8 @@ struct ScriptedModel {
 }
 
 impl ShadowModel for ScriptedModel {
-    fn name(&self) -> &str {
-        "scripted"
+    fn name(&self) -> String {
+        "scripted".to_string()
     }
 
     fn complete<'a>(

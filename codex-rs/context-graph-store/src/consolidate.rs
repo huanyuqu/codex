@@ -87,7 +87,7 @@ impl LocalContextGraphStore {
                     )
                     .await
                     .and_then(|text| {
-                        parse_episodes(&text, unsettled, model.name())
+                        parse_episodes(&text, unsettled, &model.name())
                             .map_err(|err| warn!("context graph episodes unusable: {err:#}"))
                             .ok()
                     });
@@ -123,7 +123,7 @@ impl LocalContextGraphStore {
                 .ask(graph_id, model, own_turns.len(), &prompt)
                 .await
                 .and_then(|text| {
-                    parse_branch_card(&text, model.name(), turns.len())
+                    parse_branch_card(&text, &model.name(), turns.len())
                         .map_err(|err| warn!("context graph branch card unusable: {err:#}"))
                         .ok()
                 });
@@ -146,7 +146,7 @@ impl LocalContextGraphStore {
         let started = Instant::now();
         let completion = model.complete(prompt).await;
         let mut request = IndexRequest {
-            indexer: model.name().to_string(),
+            indexer: model.name(),
             blocks: u32::try_from(turns).unwrap_or(u32::MAX),
             latency_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             ..IndexRequest::default()
