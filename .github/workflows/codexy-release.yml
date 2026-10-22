@@ -67,13 +67,20 @@ jobs:
         with:
           persist-credentials: false
 
-      # A release build of Codex needs more disk than a standard Linux runner has free.
-      - name: Free disk space (Linux)
+      # A release build of Codex needs more disk and memory than a standard Linux runner has:
+      # with 16 GB, the runner is shut down while it compiles codex-tui.
+      - name: Free disk space and add swap (Linux)
         if: ${{ runner.os == 'Linux' }}
         shell: bash
         run: |
+          set -euo pipefail
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo fallocate -l 16G /codexy-swap
+          sudo chmod 600 /codexy-swap
+          sudo mkswap /codexy-swap
+          sudo swapon /codexy-swap
           df -h .
+          free -h
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
