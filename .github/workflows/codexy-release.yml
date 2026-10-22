@@ -1,0 +1,172 @@
+name: codexy-release
+
+# Builds codexy for macOS and Linux and publishes it to npm (see codexy/RELEASING.md).
+# Pushing a codexy-vX.Y.Z tag publishes X.Y.Z. Running the workflow by hand builds and packs
+# a version, and publishes it only when asked.
+on:
+  push:
+    tags:
+      - "codexy-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build, such as 0.1.0
+        required: true
+      publish:
+        description: Publish to npm
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            version="${REF_NAME#codexy-v}"
+          else
+            version="$INPUT_VERSION"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "Not a version: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          # Cross-compiled on Apple silicon, like the official release.
+          - runner: macos-15
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # A release build of Codex needs more disk than a standard Linux runner has free.
+      - name: Free disk space (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h .
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Build Codex binaries
+        uses: ./.github/actions/build-cargo-package-binaries
+        with:
+          target: ${{ matrix.target }}
+          binaries: codex codex-code-mode-host
+
+      # The package keeps version 0.0.0, which Codex reads as a build from source, like the
+      # binary's own version: Codex then offers no update to the official release.
+      - name: Assemble the Codex package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          release_dir="${CARGO_TARGET_DIR}/${TARGET}/release"
+          package_dir="${RUNNER_TEMP}/codex-package-${TARGET}"
+          package_args=(
+            --target "$TARGET"
+            --cargo-profile release
+            --entrypoint-bin "${release_dir}/codex"
+            --code-mode-host-bin "${release_dir}/codex-code-mode-host"
+            --strip all
+            --package-dir "$package_dir"
+            --archive-output "${GITHUB_WORKSPACE}/dist/codex-package-${TARGET}.tar.gz"
+          )
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            package_args+=(--bwrap-bin "${release_dir}/bwrap")
+          fi
+          python3 scripts/build_codex_package.py "${package_args[@]}"
+          if [[ "$TARGET" != "x86_64-apple-darwin" ]]; then
+            "${package_dir}/bin/codex" --version
+          fi
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-package-${{ matrix.target }}
+          path: dist/codex-package-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  npm:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # For npm trusted publishing, which needs no token once set up.
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          # Node 24 bundles npm >= 11.5.1, which trusted publishing requires.
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: codex-package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Pack the npm packages
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+          # Only the first release needs a token: npm trusts the workflow after that.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          args=(--version "$VERSION" --out-dir dist/npm)
+          for archive in dist/codex-package-*.tar.gz; do
+            target="${archive##*/codex-package-}"
+            args+=(--native "${target%.tar.gz}=${archive}")
+          done
+          if [[ "$PUBLISH" == "true" ]]; then
+            args+=(--publish)
+          fi
+          python3 codexy/stage_npm_packages.py "${args[@]}"
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codexy-npm
+          path: dist/npm/*.tgz
+          if-no-files-found: error

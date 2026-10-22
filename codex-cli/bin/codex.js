@@ -13,13 +13,30 @@ const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 const codexPackageRoot = realpathSync(path.join(__dirname, ".."));
 
-const PLATFORM_PACKAGE_BY_TARGET = {
-  "x86_64-unknown-linux-musl": "@openai/codex-linux-x64",
-  "aarch64-unknown-linux-musl": "@openai/codex-linux-arm64",
-  "x86_64-apple-darwin": "@openai/codex-darwin-x64",
-  "aarch64-apple-darwin": "@openai/codex-darwin-arm64",
-  "x86_64-pc-windows-msvc": "@openai/codex-win32-x64",
-  "aarch64-pc-windows-msvc": "@openai/codex-win32-arm64",
+// A package built from this fork (codexy) names its platform packages after
+// itself and records the settings it launches with in its manifest.
+function readPackageJson() {
+  try {
+    return JSON.parse(
+      readFileSync(path.join(codexPackageRoot, "package.json"), "utf8"),
+    );
+  } catch {
+    return {};
+  }
+}
+
+const codexPackageJson = readPackageJson();
+const codexPackageName = codexPackageJson.name || "@openai/codex";
+const codexLaunch = codexPackageJson.codexLaunch || {};
+
+// Platform packages are installed as `${codexPackageName}-${tag}` aliases.
+const PLATFORM_TAG_BY_TARGET = {
+  "x86_64-unknown-linux-musl": "linux-x64",
+  "aarch64-unknown-linux-musl": "linux-arm64",
+  "x86_64-apple-darwin": "darwin-x64",
+  "aarch64-apple-darwin": "darwin-arm64",
+  "x86_64-pc-windows-msvc": "win32-x64",
+  "aarch64-pc-windows-msvc": "win32-arm64",
 };
 
 const { platform, arch } = process;
@@ -71,10 +88,11 @@ if (!targetTriple) {
   throw new Error(`Unsupported platform: ${platform} (${arch})`);
 }
 
-const platformPackage = PLATFORM_PACKAGE_BY_TARGET[targetTriple];
-if (!platformPackage) {
+const platformTag = PLATFORM_TAG_BY_TARGET[targetTriple];
+if (!platformTag) {
   throw new Error(`Unsupported target triple: ${targetTriple}`);
 }
+const platformPackage = `${codexPackageName}-${platformTag}`;
 
 function findCodexExecutable() {
   const override = process.env.CODEX_CONTEXT_GRAPH_BINARY;
@@ -107,12 +125,12 @@ function findCodexExecutable() {
   const packageManager = detectPackageManager();
   const updateCommand =
     packageManager === "bun"
-      ? "bun install -g @openai/codex@latest"
+      ? `bun install -g ${codexPackageName}@latest`
       : packageManager === "pnpm"
-        ? "pnpm add -g @openai/codex@latest"
+        ? `pnpm add -g ${codexPackageName}@latest`
         : packageManager === "vite-plus"
-          ? "vp install -g @openai/codex@latest"
-          : "npm install -g @openai/codex@latest";
+          ? `vp install -g ${codexPackageName}@latest`
+          : `npm install -g ${codexPackageName}@latest`;
   throw new Error(
     `Missing optional dependency ${platformPackage}. Reinstall Codex: ${updateCommand}`,
   );
@@ -133,7 +151,7 @@ function isPnpmOwnedCodexInstall(nodeModulesDir) {
 
   try {
     return (
-      realpathSync(path.join(nodeModulesDir, "@openai", "codex")) ===
+      realpathSync(path.join(nodeModulesDir, codexPackageName)) ===
       codexPackageRoot
     );
   } catch {
@@ -148,24 +166,24 @@ function isVitePlusOwnedCodexInstall(packagesDir) {
 
   try {
     const metadata = JSON.parse(
-      readFileSync(path.join(packagesDir, "@openai", "codex.json"), "utf8"),
+      readFileSync(path.join(packagesDir, `${codexPackageName}.json`), "utf8"),
     );
-    if (metadata.name !== "@openai/codex") {
+    if (metadata.name !== codexPackageName) {
       return false;
     }
 
-    // Vite+ records the active global installation in packages/@openai/codex.json.
+    // Vite+ records the active global installation in packages/<package name>.json.
     // Older installs have no ID or append a #-prefixed ID to the package name;
     // newer installs put the ID in a subdirectory of the package prefix.
     const installId = metadata.installId || "";
     const installDir = installId.startsWith("#")
-      ? path.join(packagesDir, `@openai/codex${installId}`)
-      : path.join(packagesDir, "@openai/codex", installId);
+      ? path.join(packagesDir, `${codexPackageName}${installId}`)
+      : path.join(packagesDir, codexPackageName, installId);
     for (const nodeModulesDir of [
       path.join(installDir, "lib", "node_modules"),
       path.join(installDir, "node_modules"),
     ]) {
-      const packageRoot = path.join(nodeModulesDir, "@openai", "codex");
+      const packageRoot = path.join(nodeModulesDir, codexPackageName);
       if (
         existsSync(packageRoot) &&
         realpathSync(packageRoot) === codexPackageRoot
@@ -246,12 +264,26 @@ delete env.CODEX_MANAGED_BY_BUN;
 delete env.CODEX_MANAGED_BY_PNPM;
 delete env.CODEX_MANAGED_BY_VITE_PLUS;
 env[packageManagerEnvVar] = "1";
+// The shared daemon runs the official release, which lacks this fork's features.
+if (codexLaunch.embeddedServer) {
+  env.CODEX_CONTEXT_MERGE_NO_DAEMON = "1";
+}
+// These go first, so the user's own -c overrides win.
+const launchConfigArgs = (codexLaunch.config || []).flatMap((value) => [
+  "-c",
+  value,
+]);
 if (process.argv[2] === "merge") {
   const { runMergeCommand } = await import("./merge-cli.js");
-  process.exit(await runMergeCommand(binaryPath, env, process.argv.slice(3)));
+  process.exit(
+    await runMergeCommand(binaryPath, env, [
+      ...launchConfigArgs,
+      ...process.argv.slice(3),
+    ]),
+  );
 }
 
-const nativeArgs = process.argv.slice(2);
+const nativeArgs = [...launchConfigArgs, ...process.argv.slice(2)];
 // A debug build has no daemon package. Use its embedded server for local chats.
 if (
   env.CODEX_CONTEXT_MERGE_NO_DAEMON === "1" &&
@@ -320,6 +352,14 @@ if (childResult.type === "signal") {
     process.stdout.write(
       "\nAdditional command:\n  merge  Merge conversation contexts into a new thread (codex merge --help)\n",
     );
+  }
+  // A fork's native build reports version 0.0.0, so also print the package's.
+  if (
+    childResult.exitCode === 0 &&
+    codexPackageName !== "@openai/codex" &&
+    ["--version", "-V"].includes(process.argv[2])
+  ) {
+    process.stdout.write(`${codexPackageName} ${codexPackageJson.version}\n`);
   }
   process.exit(childResult.exitCode);
 }
